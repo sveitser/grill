@@ -252,13 +252,44 @@ def _fetch_bfs_wfs(station_id: str, name: str, station_alt_m: float, timeout: fl
             last_error = f"exception: {e}"
             continue
 
+    # Both attempts failed — run GetCapabilities to discover real layer names
+    discovered = _discover_wfs_typenames(timeout)
+    if discovered:
+        uv_layers = [
+            n
+            for n in discovered
+            if any(x in n.lower() for x in ["uv", "abi", "strahlung", "radiation"])
+        ]
+        hint = f"; available UV layers: {uv_layers or discovered[:8]}"
+        logger.warning("WFS GetCapabilities typeNames: %s", discovered)
+    else:
+        hint = ""
+
     return SourceFetch(
         name=name,
         ok=False,
-        error=f"WFS: {last_error}",
+        error=f"WFS: {last_error}{hint}",
         latency_ms=(time.monotonic() - t0) * 1000,
         station_alt_m=station_alt_m,
     )
+
+
+def _discover_wfs_typenames(timeout: float) -> list[str]:
+    """Fetch WFS GetCapabilities and return all available typeNames."""
+    try:
+        resp = httpx.get(
+            WFS_BASE_URL,
+            params={"service": "WFS", "version": "1.1.0", "request": "GetCapabilities"},
+            timeout=timeout,
+            follow_redirects=True,
+        )
+        if not resp.is_success:
+            return []
+        # GetCapabilities is XML; extract <Name> elements that look like WFS typeNames
+        names = re.findall(r"<(?:\w+:)?Name>([^<\s]+:[^<\s]+)</(?:\w+:)?Name>", resp.text)
+        return sorted(set(names))
+    except Exception:
+        return []
 
 
 def _filter_features_by_station(features: list[dict], station_id: str) -> list[dict]:
