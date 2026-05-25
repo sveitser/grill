@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UV Index</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #f0f0f0;
+      color: #111;
+      min-height: 100vh;
+    }
+
+    #app { max-width: 680px; margin: 0 auto; padding-bottom: 2rem; }
+
+    /* ── Header ── */
+    header {
+      padding: 1rem 1.25rem 0.8rem;
+      background: #16213e;
+      color: #fff;
+    }
+
+    header h1 {
+      font-size: clamp(1.05rem, 4vw, 1.35rem);
+      font-weight: 600;
+    }
+
+    #datetime {
+      font-size: 0.82rem;
+      opacity: 0.65;
+      margin-top: 0.2rem;
+      letter-spacing: 0.02em;
+    }
+
+    /* ── Hero ── */
+    #hero {
+      padding: 1.75rem 1.25rem 1.5rem;
+      text-align: center;
+      transition: background 0.4s;
+    }
+
+    #uv-number {
+      font-size: clamp(4rem, 18vw, 7rem);
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: -3px;
+    }
+
+    #uv-label {
+      font-size: clamp(1rem, 4vw, 1.25rem);
+      font-weight: 500;
+      margin-top: 0.3rem;
+      opacity: 0.9;
+    }
+
+    #uv-advice {
+      font-size: 0.88rem;
+      margin-top: 0.4rem;
+      opacity: 0.75;
+    }
+
+    .hero-night    { background: #16213e; color: #fff; }
+    .hero-low      { background: #2e7d32; color: #fff; }
+    .hero-moderate { background: #f57f17; color: #111; }
+    .hero-high     { background: #e65100; color: #fff; }
+    .hero-veryhigh { background: #b71c1c; color: #fff; }
+    .hero-extreme  { background: #4a148c; color: #fff; }
+
+    /* ── Chart card ── */
+    .card {
+      background: #fff;
+      margin: 0.65rem 0.75rem 0;
+      border-radius: 12px;
+      padding: 0.9rem 0.85rem 0.65rem;
+      box-shadow: 0 1px 5px rgba(0,0,0,0.09);
+    }
+
+    .card-title {
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #888;
+      margin-bottom: 0.7rem;
+    }
+
+    #uv-chart { width: 100% !important; height: 220px !important; }
+
+    /* ── Info card ── */
+    #info {
+      font-size: 0.78rem;
+      color: #555;
+      line-height: 1.7;
+    }
+
+    #info .row { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+    #info .lbl { font-weight: 600; color: #333; flex-shrink: 0; }
+    #source-errors { color: #c62828; }
+    #version-str { font-family: monospace; font-size: 0.7rem; color: #aaa; margin-top: 0.3rem; }
+
+    /* ── Loading / Error ── */
+    #loading, #error-banner {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 35vh;
+      padding: 2rem 1.5rem;
+      font-size: 0.95rem;
+    }
+
+    #error-banner {
+      color: #c62828;
+      background: #ffebee;
+      border-radius: 10px;
+      margin: 1rem 0.75rem;
+    }
+  </style>
+</head>
+<body>
+<div id="app">
+  <div id="loading">Loading UV data…</div>
+  <div id="error-banner" style="display:none"></div>
+
+  <div id="content" style="display:none">
+    <header>
+      <h1 id="location-name">UV Index</h1>
+      <div id="datetime"></div>
+    </header>
+
+    <section id="hero" class="hero-night">
+      <div id="uv-number">—</div>
+      <div id="uv-label"></div>
+      <div id="uv-advice"></div>
+    </section>
+
+    <div class="card">
+      <div class="card-title">Today's UV forecast</div>
+      <canvas id="uv-chart"></canvas>
+    </div>
+
+    <div class="card" id="info">
+      <div class="row"><span class="lbl">Sources</span><span id="sources-list"></span></div>
+      <div id="source-errors"></div>
+      <div class="row"><span class="lbl">BFS offset</span><span id="bfs-offset"></span></div>
+      <div id="version-str"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+// UV index → bar colour
+function uvColor(uv) {
+  if (uv <= 2)  return '#43a047';
+  if (uv <= 5)  return '#ffb300';
+  if (uv <= 7)  return '#ef6c00';
+  if (uv <= 10) return '#e53935';
+  return '#8e24aa';
+}
+
+// Hero section CSS class
+function heroClass(uv, isDay) {
+  if (!isDay || uv < 0.05) return 'hero-night';
+  if (uv <= 2)  return 'hero-low';
+  if (uv <= 5)  return 'hero-moderate';
+  if (uv <= 7)  return 'hero-high';
+  if (uv <= 10) return 'hero-veryhigh';
+  return 'hero-extreme';
+}
+
+// Custom Chart.js plugin: dashed vertical line at current hour
+let _nowIdx = -1;
+const nowLinePlugin = {
+  id: 'nowLine',
+  afterDraw(chart) {
+    if (_nowIdx < 0) return;
+    const { ctx, chartArea, scales } = chart;
+    const x = scales.x.getPixelForValue(_nowIdx);
+    ctx.save();
+    ctx.strokeStyle = 'rgba(200,30,30,0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    ctx.moveTo(x, chartArea.top);
+    ctx.lineTo(x, chartArea.bottom);
+    ctx.stroke();
+    ctx.restore();
+  }
+};
+
+let _chart = null;
+
+function render(data) {
+  const loc = data.location;
+  const cur = data.current;
+  const hourly = data.hourly;
+
+  // Header: location + time
+  const name = loc.name || `${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)}`;
+  document.title = `UV Index — ${name}`;
+  document.getElementById('location-name').textContent = name;
+
+  // Parse time from computed_at ISO string (already in local tz)
+  const at = data.computed_at; // e.g. "2026-05-25T13:45:23.456+02:00"
+  document.getElementById('datetime').textContent =
+    at.substring(0, 10) + '  ' + at.substring(11, 16);
+
+  // Hero
+  const uv = cur.uv_index;
+  document.getElementById('uv-number').textContent = uv.toFixed(1);
+  document.getElementById('uv-label').textContent = cur.category;
+  document.getElementById('uv-advice').textContent = cur.advice;
+  document.getElementById('hero').className = heroClass(uv, cur.is_daytime);
+
+  // Current hour (from ISO string, already local time)
+  const currentHour = parseInt(at.substring(11, 13), 10);
+  const hours = hourly.map(p => p.hour);
+  _nowIdx = hours.indexOf(currentHour);
+
+  // Chart datasets
+  const labels = hours.map(h => `${h}h`);
+  const uvVals = hourly.map(p => p.uv_index);
+  const csVals = hourly.map(p => p.uv_index_clear_sky);
+  const cloudVals = hourly.map(p => p.cloud_cover_pct);
+  const maxUV = Math.max(1, ...uvVals, ...csVals);
+
+  const ctx = document.getElementById('uv-chart').getContext('2d');
+  if (_chart) _chart.destroy();
+  _chart = new Chart(ctx, {
+    plugins: [nowLinePlugin],
+    data: {
+      labels,
+      datasets: [
+        {
+          type: 'bar',
+          label: 'UV Index',
+          data: uvVals,
+          backgroundColor: uvVals.map(uvColor),
+          borderRadius: 3,
+          yAxisID: 'y',
+          order: 2,
+        },
+        {
+          type: 'line',
+          label: 'Clear-sky',
+          data: csVals,
+          borderColor: 'rgba(90,90,90,0.45)',
+          borderDash: [4, 3],
+          borderWidth: 1.5,
+          pointRadius: 0,
+          fill: false,
+          tension: 0.4,
+          yAxisID: 'y',
+          order: 1,
+        },
+        {
+          type: 'line',
+          label: 'Cloud %',
+          data: cloudVals,
+          borderColor: 'rgba(100,140,220,0.35)',
+          backgroundColor: 'rgba(100,140,220,0.07)',
+          borderWidth: 1,
+          pointRadius: 0,
+          fill: true,
+          tension: 0.4,
+          yAxisID: 'y2',
+          order: 3,
+        },
+      ],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: {
+          position: 'top',
+          labels: { boxWidth: 11, font: { size: 10 }, padding: 10 },
+        },
+        tooltip: {
+          callbacks: {
+            label(ctx) {
+              if (ctx.dataset.label === 'Cloud %')
+                return `Cloud: ${ctx.parsed.y.toFixed(0)}%`;
+              return `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}`;
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          grid: { display: false },
+          ticks: { font: { size: 9 }, maxRotation: 0 },
+        },
+        y: {
+          min: 0,
+          max: Math.ceil(maxUV) + 1,
+          ticks: { font: { size: 9 } },
+          grid: { color: 'rgba(0,0,0,0.05)' },
+        },
+        y2: {
+          min: 0,
+          max: 100,
+          position: 'right',
+          ticks: { font: { size: 9 }, callback: v => `${v}%` },
+          grid: { drawOnChartArea: false },
+        },
+      },
+    },
+  });
+
+  // Info card
+  document.getElementById('sources-list').textContent =
+    data.sources_used.join(', ') || '—';
+
+  const errs = data.source_errors || {};
+  const errEntries = Object.entries(errs);
+  document.getElementById('source-errors').textContent = errEntries.length
+    ? 'Unavailable: ' + errEntries.map(([k, v]) => `${k} (${v})`).join(', ')
+    : '';
+
+  const off = data.bfs_offset;
+  document.getElementById('bfs-offset').textContent =
+    off != null ? `${off >= 0 ? '+' : ''}${off.toFixed(2)}` : '—';
+
+  document.getElementById('version-str').textContent =
+    data.version ? `v${data.version}` : '';
+
+  document.getElementById('content').style.display = '';
+  document.getElementById('loading').style.display = 'none';
+}
+
+function showError(msg) {
+  document.getElementById('loading').style.display = 'none';
+  const el = document.getElementById('error-banner');
+  el.textContent = `⚠ ${msg}`;
+  el.style.display = 'flex';
+}
+
+async function load() {
+  const params = new URLSearchParams(window.location.search);
+  const qs = params.toString() ? '?' + params.toString() : '';
+  try {
+    const resp = await fetch('/uv' + qs);
+    const data = await resp.json();
+    if (!resp.ok) {
+      showError(data.error || `Error ${resp.status}`);
+      return;
+    }
+    render(data);
+  } catch (e) {
+    showError('Could not load UV data: ' + e.message);
+  }
+}
+
+load();
+setInterval(load, 5 * 60 * 1000);
+</script>
+</body>
+</html>

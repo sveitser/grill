@@ -9,8 +9,9 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
+from uvrad._version import VERSION
 from uvrad.config import DEFAULT
 from uvrad.estimate import get_uv_estimate
 from uvrad.models import Location, UVDataUnavailableError, uv_category
@@ -48,9 +49,14 @@ app = FastAPI(
 )
 
 
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse("api/index.html", media_type="text/html")
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "version": VERSION}
 
 
 @app.get("/uv")
@@ -89,6 +95,7 @@ def get_uv(
     cat, advice = uv_category(est.current_uv)
 
     payload = {
+        "version": VERSION,
         "location": {
             "lat": est.location.lat,
             "lon": est.location.lon,
