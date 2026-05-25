@@ -101,6 +101,40 @@
     #source-errors { color: #c62828; }
     #version-str { font-family: monospace; font-size: 0.7rem; color: #aaa; margin-top: 0.3rem; }
 
+    /* ── Computation card ── */
+    #computation {
+      font-size: 0.76rem;
+      color: #555;
+      line-height: 1.65;
+    }
+
+    #computation .section-title {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #aaa;
+      margin: 0.55rem 0 0.2rem;
+    }
+    #computation .section-title:first-child { margin-top: 0; }
+
+    #computation table {
+      border-collapse: collapse;
+      width: 100%;
+      font-size: 0.74rem;
+    }
+    #computation th {
+      text-align: left;
+      font-weight: 600;
+      color: #444;
+      padding: 0.1rem 0.5rem 0.1rem 0;
+      white-space: nowrap;
+    }
+    #computation td {
+      padding: 0.1rem 0.5rem 0.1rem 0;
+      color: #555;
+    }
+    #computation .mono { font-family: monospace; font-size: 0.73rem; }
+
     /* ── Loading / Error ── */
     #loading, #error-banner {
       display: flex;
@@ -146,6 +180,11 @@
       <div id="source-errors"></div>
       <div class="row"><span class="lbl">BFS offset</span><span id="bfs-offset"></span></div>
       <div id="version-str"></div>
+    </div>
+
+    <div class="card" id="computation">
+      <div class="card-title">How it was computed</div>
+      <div id="computation-body"></div>
     </div>
   </div>
 </div>
@@ -311,6 +350,9 @@ function render(data) {
     },
   });
 
+  // Computation card
+  renderComputation(data.computation);
+
   // Info card
   document.getElementById('sources-list').textContent =
     data.sources_used.join(', ') || '—';
@@ -330,6 +372,68 @@ function render(data) {
 
   document.getElementById('content').style.display = '';
   document.getElementById('loading').style.display = 'none';
+}
+
+function renderComputation(c) {
+  const el = document.getElementById('computation-body');
+  if (!c) { el.textContent = '—'; return; }
+
+  let html = '';
+
+  // Fusion sources
+  html += '<div class="section-title">Fusion (weighted average)</div>';
+  html += '<table><tr><th>Source</th><th>Weight</th><th>UV (cloud-corr)</th><th>Clear-sky UV</th></tr>';
+  for (const s of c.fusion.sources) {
+    const pct = (s.weight * 100).toFixed(0);
+    html += `<tr>
+      <td>${s.name}</td>
+      <td class="mono">${pct}%</td>
+      <td class="mono">${s.uv_index.toFixed(2)}</td>
+      <td class="mono">${s.uv_index_clear_sky.toFixed(2)}</td>
+    </tr>`;
+  }
+  html += '</table>';
+
+  // Altitude correction
+  const alt = c.altitude_correction;
+  html += '<div class="section-title">Altitude correction</div>';
+  html += `<table>
+    <tr><th>From</th><td class="mono">${alt.from_alt_m} m (model sea-level output)</td></tr>
+    <tr><th>To</th><td class="mono">${alt.to_alt_m} m</td></tr>
+    <tr><th>Factor</th><td class="mono">×${alt.factor} &nbsp;<span style="color:#aaa">(${alt.formula})</span></td></tr>
+  </table>`;
+
+  // Solar interpolation
+  html += '<div class="section-title">Sub-hour interpolation</div>';
+  if (c.interpolation) {
+    const ip = c.interpolation;
+    const prev_pct = ((1 - ip.cos_fraction) * 100).toFixed(0);
+    const next_pct = (ip.cos_fraction * 100).toFixed(0);
+    html += `<table>
+      <tr><th>Method</th><td class="mono">${ip.method}</td></tr>
+      <tr><th>Bracket</th><td class="mono">${ip.prev_hour}h (UV ${ip.prev_uv.toFixed(2)}, weight ${prev_pct}%)
+          → ${ip.next_hour}h (UV ${ip.next_uv.toFixed(2)}, weight ${next_pct}%)</td></tr>
+    </table>`;
+  } else {
+    html += '<span style="color:#aaa">Sun below horizon — UV = 0</span>';
+  }
+
+  // BFS calibration
+  html += '<div class="section-title">BFS calibration offset</div>';
+  if (c.bfs_calibration) {
+    const bfs = c.bfs_calibration;
+    const sign = bfs.offset >= 0 ? '+' : '';
+    html += `<table>
+      <tr><th>Station</th><td>${bfs.station} (${bfs.station_alt_m} m)</td></tr>
+      <tr><th>Hours matched</th><td class="mono">${bfs.hours_matched}</td></tr>
+      <tr><th>Offset</th><td class="mono">${sign}${bfs.offset.toFixed(3)}</td></tr>
+      <tr><th>Note</th><td style="color:#aaa">${bfs.note}</td></tr>
+    </table>`;
+  } else {
+    html += '<span style="color:#aaa">BFS data unavailable</span>';
+  }
+
+  el.innerHTML = html;
 }
 
 function showError(msg) {

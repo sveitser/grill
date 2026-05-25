@@ -2,7 +2,7 @@
 
 import pytest
 
-from uvrad.fusion import fuse
+from uvrad.fusion import FuseResult, fuse
 from uvrad.models import HourlyPoint, Location, SourceFetch, UVDataUnavailableError
 
 BASEL = Location(lat=47.5596, lon=7.5886, alt_m=260.0, name="Basel")
@@ -16,33 +16,45 @@ def _make_fetch(name: str, uv_values: list[float], ok: bool = True) -> SourceFet
     return SourceFetch(name=name, ok=ok, hourly=points if ok else [])
 
 
+def test_fuse_returns_fuse_result():
+    icon = _make_fetch("Open-Meteo Global", [0.0] * 24)
+    cams = _make_fetch("Open-Meteo ECMWF", [0.0] * 24)
+    result = fuse(BASEL, icon, cams)
+    assert isinstance(result, FuseResult)
+
+
 def test_fuse_two_sources_equal_weights():
     icon = _make_fetch("Open-Meteo Global", [0.0] * 6 + [2.0, 4.0, 6.0, 8.0, 7.0, 5.0] + [0.0] * 12)
     cams = _make_fetch("Open-Meteo ECMWF", [0.0] * 6 + [2.0, 4.0, 7.0, 9.0, 8.0, 6.0] + [0.0] * 12)
 
-    hourly, sources, weights, bfs_off = fuse(BASEL, icon, cams)
+    r = fuse(BASEL, icon, cams)
 
-    assert len(hourly) == 24
-    assert "Open-Meteo Global" in sources
-    assert "Open-Meteo ECMWF" in sources
-    assert bfs_off is None
+    assert len(r.hourly) == 24
+    assert "Open-Meteo Global" in r.sources_used
+    assert "Open-Meteo ECMWF" in r.sources_used
+    assert r.bfs_offset is None
+    assert r.bfs_hours_matched == 0
 
     # Hour 9: Global=8, ECMWF=9, equal weights → avg=8.5 before altitude correction
-    h9 = hourly[9]
     expected_uv = 8.5 * (1.0 + 260.0 / 1000.0 * 0.10)
-    assert h9.uv_index == pytest.approx(expected_uv, rel=0.01)
+    assert r.hourly[9].uv_index == pytest.approx(expected_uv, rel=0.01)
+
+    # per_source_hourly should contain both sources with 24-element lists
+    assert "Open-Meteo Global" in r.per_source_hourly
+    assert "Open-Meteo ECMWF" in r.per_source_hourly
+    assert len(r.per_source_hourly["Open-Meteo Global"]) == 24
 
 
 def test_fuse_fallback_to_single_source():
     icon = _make_fetch("Open-Meteo Global", [0.0] * 12 + [5.0] * 12)
     cams = _make_fetch("Open-Meteo ECMWF", [], ok=False)
 
-    hourly, sources, weights, _ = fuse(BASEL, icon, cams)
+    r = fuse(BASEL, icon, cams)
 
-    assert sources == ["Open-Meteo Global"]
-    assert weights["Open-Meteo Global"] == pytest.approx(1.0)
+    assert r.sources_used == ["Open-Meteo Global"]
+    assert r.weights["Open-Meteo Global"] == pytest.approx(1.0)
     expected = 5.0 * (1.0 + 260.0 / 1000.0 * 0.10)
-    assert hourly[12].uv_index == pytest.approx(expected, rel=0.01)
+    assert r.hourly[12].uv_index == pytest.approx(expected, rel=0.01)
 
 
 def test_fuse_no_sources_raises():
@@ -72,10 +84,10 @@ def test_fuse_altitude_correction_applied():
     icon = _make_fetch("Open-Meteo Global", [5.0] * 24)
     cams = _make_fetch("Open-Meteo ECMWF", [5.0] * 24)
 
-    hourly_sl, _, _, _ = fuse(sea_level, icon, cams)
-    hourly_bl, _, _, _ = fuse(BASEL, icon, cams)
+    r_sl = fuse(sea_level, icon, cams)
+    r_bl = fuse(BASEL, icon, cams)
 
-    assert hourly_bl[12].uv_index > hourly_sl[12].uv_index
+    assert r_bl.hourly[12].uv_index > r_sl.hourly[12].uv_index
 
 
 def test_fuse_bfs_offset_computed():
@@ -83,18 +95,19 @@ def test_fuse_bfs_offset_computed():
     cams = _make_fetch("Open-Meteo ECMWF", [0.0] * 6 + [4.0] * 12 + [0.0] * 6)
     bfs = _make_fetch("BFS Schauinsland", [0.0] * 6 + [6.0] * 12 + [0.0] * 6)
 
-    _, _, _, bfs_offset = fuse(BASEL, icon, cams, bfs_fetch=bfs)
+    r = fuse(BASEL, icon, cams, bfs_fetch=bfs)
 
-    assert bfs_offset is not None
-    assert bfs_offset != 0.0
+    assert r.bfs_offset is not None
+    assert r.bfs_offset != 0.0
+    assert r.bfs_hours_matched == 12
 
 
 def test_fuse_uv_never_negative():
     icon = _make_fetch("Open-Meteo Global", [-1.0, 0.0, 5.0] + [0.0] * 21)
     cams = _make_fetch("Open-Meteo ECMWF", [0.0] * 24)
 
-    hourly, _, _, _ = fuse(BASEL, icon, cams)
-    assert all(p.uv_index >= 0.0 for p in hourly)
+    r = fuse(BASEL, icon, cams)
+    assert all(p.uv_index >= 0.0 for p in r.hourly)
 
 
 def test_fuse_three_sources():
@@ -102,13 +115,13 @@ def test_fuse_three_sources():
     cams = _make_fetch("Open-Meteo ECMWF", [0.0] * 8 + [7.0] * 8 + [0.0] * 8)
     metro = _make_fetch("MeteoSwiss ICON-CH2", [0.0] * 8 + [6.0] * 8 + [0.0] * 8)
 
-    hourly, sources, weights, _ = fuse(BASEL, icon, cams, metro)
+    r = fuse(BASEL, icon, cams, metro)
 
-    assert len(sources) == 3
-    assert "MeteoSwiss ICON-CH2" in sources
+    assert len(r.sources_used) == 3
+    assert "MeteoSwiss ICON-CH2" in r.sources_used
     # All three have equal SOURCE_WEIGHTS (0.5), so equal final weights
-    for w in weights.values():
+    for w in r.weights.values():
         assert w == pytest.approx(1 / 3, rel=0.01)
     # Average of 5, 7, 6 = 6 before altitude correction
     expected = 6.0 * (1.0 + 260.0 / 1000.0 * 0.10)
-    assert hourly[8].uv_index == pytest.approx(expected, rel=0.01)
+    assert r.hourly[8].uv_index == pytest.approx(expected, rel=0.01)

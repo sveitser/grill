@@ -5,6 +5,47 @@ from datetime import datetime
 
 
 @dataclass
+class SourceContribution:
+    name: str
+    weight: float
+    uv_index: float  # altitude-corrected, at the interpolated hour bracket
+    uv_index_clear_sky: float
+
+
+@dataclass
+class AltitudeCorrectionTrace:
+    from_alt_m: float  # model outputs are sea-level equivalent (0 m)
+    to_alt_m: float
+    factor: float  # altitude_factor(to) / altitude_factor(from)
+
+
+@dataclass
+class InterpolationTrace:
+    method: str  # "cosine_weighted" or "linear_fallback"
+    prev_hour: int
+    next_hour: int
+    prev_uv: float
+    next_uv: float
+    cos_fraction: float  # fraction (0–1) applied toward next_hour
+
+
+@dataclass
+class BFSTrace:
+    station: str
+    station_alt_m: float
+    hours_matched: int
+    offset: float  # mean(bfs_at_target_alt − fused) over matched hours
+
+
+@dataclass
+class ComputationTrace:
+    altitude_correction: AltitudeCorrectionTrace
+    source_contributions: list[SourceContribution]
+    interpolation: InterpolationTrace | None  # None when sun is below horizon
+    bfs: BFSTrace | None
+
+
+@dataclass
 class Location:
     lat: float
     lon: float
@@ -43,6 +84,7 @@ class UVEstimate:
     bfs_offset: float | None  # positive = model underestimates vs BFS ground truth
     computed_at: datetime
     source_errors: dict[str, str] = field(default_factory=dict)
+    computation: "ComputationTrace | None" = None
 
 
 class UVDataUnavailableError(Exception):

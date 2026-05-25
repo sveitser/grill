@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 import pvlib
 
-from uvrad.models import HourlyPoint
+from uvrad.models import HourlyPoint, InterpolationTrace
 
 
 def solar_zenith_deg(lat: float, lon: float, dt: datetime) -> float:
@@ -101,3 +101,71 @@ def interpolate_current_uv(
         result = uv0 + frac * (uv1 - uv0)
 
     return max(0.0, result)
+
+
+def interpolate_current_uv_traced(
+    hourly: list[HourlyPoint],
+    lat: float,
+    lon: float,
+    now: datetime,
+) -> tuple[float, InterpolationTrace | None]:
+    """Like interpolate_current_uv but also returns an InterpolationTrace.
+
+    The trace is None when the sun is below the horizon.
+    """
+    hour = now.hour
+    minute = now.minute
+
+    if not hourly:
+        return 0.0, None
+
+    h0 = min(hour, len(hourly) - 1)
+    h1 = min(hour + 1, len(hourly) - 1)
+
+    uv0 = max(0.0, hourly[h0].uv_index)
+    uv1 = max(0.0, hourly[h1].uv_index)
+
+    if h0 == h1:
+        return uv0, None
+
+    frac = minute / 60.0
+
+    dt0 = now.replace(hour=h0, minute=0, second=0, microsecond=0)
+    dt1 = now.replace(hour=h1, minute=0, second=0, microsecond=0)
+
+    z0 = solar_zenith_deg(lat, lon, dt0)
+    z_now = solar_zenith_deg(lat, lon, now)
+    z1 = solar_zenith_deg(lat, lon, dt1)
+
+    if z_now >= 90.0:
+        return 0.0, None
+
+    cos0 = max(0.0, float(np.cos(np.radians(z0))))
+    cos_now = max(0.0, float(np.cos(np.radians(z_now))))
+    cos1 = max(0.0, float(np.cos(np.radians(z1))))
+
+    cos_interp = cos0 + frac * (cos1 - cos0)
+
+    if cos_interp <= 0.0:
+        return 0.0, None
+
+    if cos0 > 0.0 and cos1 > 0.0:
+        cos_frac = (cos_now - cos0) / (cos1 - cos0) if (cos1 - cos0) != 0.0 else frac
+        cos_frac = max(0.0, min(1.0, cos_frac))
+        result = uv0 + cos_frac * (uv1 - uv0)
+        method = "cosine_weighted"
+        used_frac = cos_frac
+    else:
+        result = uv0 + frac * (uv1 - uv0)
+        method = "linear_fallback"
+        used_frac = frac
+
+    trace = InterpolationTrace(
+        method=method,
+        prev_hour=h0,
+        next_hour=h1,
+        prev_uv=round(uv0, 3),
+        next_uv=round(uv1, 3),
+        cos_fraction=round(used_frac, 4),
+    )
+    return max(0.0, result), trace

@@ -14,9 +14,59 @@ from fastapi.responses import FileResponse, JSONResponse
 from uvrad._version import VERSION
 from uvrad.config import DEFAULT
 from uvrad.estimate import get_uv_estimate
-from uvrad.models import Location, UVDataUnavailableError, uv_category
+from uvrad.models import Location, UVDataUnavailableError, UVEstimate, uv_category
 
 _cache: dict[str, tuple[float, dict]] = {}  # key → (expires_at, payload)
+
+
+def _serialize_computation(est: UVEstimate) -> dict | None:
+    c = est.computation
+    if c is None:
+        return None
+    result: dict = {
+        "altitude_correction": {
+            "from_alt_m": c.altitude_correction.from_alt_m,
+            "to_alt_m": c.altitude_correction.to_alt_m,
+            "factor": c.altitude_correction.factor,
+            "formula": "1 + (alt_m / 1000) × 0.10  (WHO/ICNIRP)",
+        },
+        "fusion": {
+            "method": "weighted_average",
+            "sources": [
+                {
+                    "name": s.name,
+                    "weight": s.weight,
+                    "uv_index": s.uv_index,
+                    "uv_index_clear_sky": s.uv_index_clear_sky,
+                }
+                for s in c.source_contributions
+            ],
+        },
+    }
+    if c.interpolation:
+        result["interpolation"] = {
+            "method": c.interpolation.method,
+            "prev_hour": c.interpolation.prev_hour,
+            "next_hour": c.interpolation.next_hour,
+            "prev_uv": c.interpolation.prev_uv,
+            "next_uv": c.interpolation.next_uv,
+            "cos_fraction": c.interpolation.cos_fraction,
+        }
+    else:
+        result["interpolation"] = None
+    if c.bfs:
+        result["bfs_calibration"] = {
+            "station": c.bfs.station,
+            "station_alt_m": c.bfs.station_alt_m,
+            "hours_matched": c.bfs.hours_matched,
+            "offset": c.bfs.offset,
+            "note": "offset is informational — not applied to the estimate",
+        }
+    else:
+        result["bfs_calibration"] = None
+    return result
+
+
 CACHE_TTL = 300  # 5 minutes
 
 
@@ -125,6 +175,7 @@ def get_uv(
         "source_errors": est.source_errors,
         "bfs_offset": est.bfs_offset,
         "computed_at": est.computed_at.isoformat(),
+        "computation": _serialize_computation(est),
     }
 
     _store(key, payload)

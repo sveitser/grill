@@ -8,11 +8,24 @@ from datetime import datetime
 
 import pandas as pd
 
+from uvrad.altitude import altitude_factor
 from uvrad.config import DEFAULT, Config
 from uvrad.fusion import fuse
-from uvrad.models import Location, UVEstimate
-from uvrad.solar import interpolate_current_uv, solar_zenith_deg, solar_zenith_series
-from uvrad.sources.bfs import fetch_bfs_schauinsland
+from uvrad.models import (
+    AltitudeCorrectionTrace,
+    BFSTrace,
+    ComputationTrace,
+    Location,
+    SourceContribution,
+    UVEstimate,
+)
+from uvrad.solar import (
+    interpolate_current_uv,
+    interpolate_current_uv_traced,
+    solar_zenith_deg,
+    solar_zenith_series,
+)
+from uvrad.sources.bfs import SCHAUINSLAND_ALT_M, fetch_bfs_schauinsland
 from uvrad.sources.open_meteo import fetch_gfs, fetch_icon
 
 
@@ -40,9 +53,13 @@ def get_uv_estimate(
         bfs_fetch = fetch_bfs_schauinsland(timeout=config.bfs_timeout)
 
     # Fuse into a single hourly series; raises UVDataUnavailableError if all sources fail
-    hourly, sources_used, weights, bfs_offset = fuse(
-        loc, icon_fetch, gfs_fetch, bfs_fetch=bfs_fetch
-    )
+    fused = fuse(loc, icon_fetch, gfs_fetch, bfs_fetch=bfs_fetch)
+    hourly = fused.hourly
+    sources_used = fused.sources_used
+    weights = fused.weights
+    bfs_offset = fused.bfs_offset
+    per_source_hourly = fused.per_source_hourly
+    bfs_hours_matched = fused.bfs_hours_matched
 
     all_model_fetches = [icon_fetch, gfs_fetch]
     source_errors = {f.name: f.error for f in all_model_fetches if not f.ok and f.error}
@@ -60,8 +77,8 @@ def get_uv_estimate(
     for point, z in zip(hourly, zeniths, strict=False):
         point.solar_zenith_deg = z
 
-    # Interpolate current UV
-    current_uv = interpolate_current_uv(hourly, loc.lat, loc.lon, now)
+    # Interpolate current UV (with trace for computation transparency)
+    current_uv, interp_trace = interpolate_current_uv_traced(hourly, loc.lat, loc.lon, now)
 
     # Clear-sky current UV (same interpolation on clear-sky series)
     from uvrad.models import HourlyPoint
@@ -77,6 +94,42 @@ def get_uv_estimate(
     ]
     current_uv_cs = interpolate_current_uv(cs_hourly, loc.lat, loc.lon, now)
 
+    # Build altitude correction trace
+    alt_factor = altitude_factor(loc.alt_m) / altitude_factor(0.0)
+    alt_trace = AltitudeCorrectionTrace(
+        from_alt_m=0.0,
+        to_alt_m=loc.alt_m,
+        factor=round(alt_factor, 4),
+    )
+
+    # Per-source contributions at the interpolation hour bracket
+    bracket_hour = now.hour
+    source_contribs = [
+        SourceContribution(
+            name=name,
+            weight=round(weights[name], 4),
+            uv_index=round(per_source_hourly[name][bracket_hour].uv_index, 3),
+            uv_index_clear_sky=round(per_source_hourly[name][bracket_hour].uv_index_clear_sky, 3),
+        )
+        for name in sources_used
+    ]
+
+    bfs_trace: BFSTrace | None = None
+    if bfs_offset is not None:
+        bfs_trace = BFSTrace(
+            station="Schauinsland",
+            station_alt_m=SCHAUINSLAND_ALT_M,
+            hours_matched=bfs_hours_matched,
+            offset=round(bfs_offset, 3),
+        )
+
+    computation = ComputationTrace(
+        altitude_correction=alt_trace,
+        source_contributions=source_contribs,
+        interpolation=interp_trace,
+        bfs=bfs_trace,
+    )
+
     return UVEstimate(
         location=loc,
         current_uv=round(current_uv, 2),
@@ -89,4 +142,5 @@ def get_uv_estimate(
         bfs_offset=round(bfs_offset, 2) if bfs_offset is not None else None,
         computed_at=now,
         source_errors=source_errors,
+        computation=computation,
     )

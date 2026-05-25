@@ -12,6 +12,8 @@ Why BFS is calibration-only (not averaged in):
   assuming Basel and Schauinsland have the same conditions).
 """
 
+from dataclasses import dataclass, field
+
 from uvrad.altitude import correct_uv
 from uvrad.models import HourlyPoint, Location, SourceFetch, UVDataUnavailableError
 from uvrad.sources.bfs import SCHAUINSLAND_ALT_M
@@ -23,18 +25,22 @@ SOURCE_WEIGHTS: dict[str, float] = {
 }
 
 
+@dataclass
+class FuseResult:
+    hourly: list[HourlyPoint]
+    sources_used: list[str]
+    weights: dict[str, float]
+    bfs_offset: float | None
+    per_source_hourly: dict[str, list[HourlyPoint]] = field(default_factory=dict)
+    bfs_hours_matched: int = 0
+
+
 def fuse(
     location: Location,
     *model_fetches: SourceFetch,
     bfs_fetch: SourceFetch | None = None,
-) -> tuple[list[HourlyPoint], list[str], dict[str, float], float | None]:
+) -> FuseResult:
     """Fuse source data into a single altitude-corrected hourly series.
-
-    Returns:
-        hourly: 24-element list of fused HourlyPoints (altitude-corrected)
-        sources_used: names of sources that contributed
-        weights: effective weight per source
-        bfs_offset: mean(bfs_corrected - fused) over available hours, or None
 
     Raises:
         UVDataUnavailableError: if no model source returned usable UV data
@@ -57,6 +63,30 @@ def fuse(
         return {p.hour: p for p in fetch.hourly}
 
     lookups = [(to_lookup(f), w) for f, w in normalized]
+
+    # Build altitude-corrected hourly series per source
+    per_source_hourly: dict[str, list[HourlyPoint]] = {}
+    for fetch, _ in normalized:
+        src_series: list[HourlyPoint] = []
+        lookup = {p.hour: p for p in fetch.hourly}
+        for h in range(24):
+            if h in lookup:
+                p = lookup[h]
+                uv_c = correct_uv(p.uv_index, from_alt_m=0.0, to_alt_m=location.alt_m)
+                uv_cs_c = correct_uv(p.uv_index_clear_sky, from_alt_m=0.0, to_alt_m=location.alt_m)
+                src_series.append(
+                    HourlyPoint(
+                        hour=h,
+                        uv_index=max(0.0, uv_c),
+                        uv_index_clear_sky=max(0.0, uv_cs_c),
+                        cloud_cover_pct=p.cloud_cover_pct,
+                    )
+                )
+            else:
+                src_series.append(
+                    HourlyPoint(hour=h, uv_index=0.0, uv_index_clear_sky=0.0, cloud_cover_pct=0.0)
+                )
+        per_source_hourly[fetch.name] = src_series
 
     fused_hourly: list[HourlyPoint] = []
     for h in range(24):
@@ -99,21 +129,30 @@ def fuse(
 
     # BFS calibration offset
     bfs_offset: float | None = None
+    bfs_hours_matched = 0
     if bfs_fetch and bfs_fetch.ok and bfs_fetch.hourly:
-        bfs_offset = _compute_bfs_offset(fused_hourly, bfs_fetch, location.alt_m)
+        bfs_offset, bfs_hours_matched = _compute_bfs_offset(fused_hourly, bfs_fetch, location.alt_m)
 
-    return fused_hourly, sources_used, weights, bfs_offset
+    return FuseResult(
+        hourly=fused_hourly,
+        sources_used=sources_used,
+        weights=weights,
+        bfs_offset=bfs_offset,
+        per_source_hourly=per_source_hourly,
+        bfs_hours_matched=bfs_hours_matched,
+    )
 
 
 def _compute_bfs_offset(
     fused: list[HourlyPoint],
     bfs_fetch: SourceFetch,
     target_alt_m: float,
-) -> float | None:
+) -> tuple[float | None, int]:
     """Compute mean(bfs_at_target_alt - fused) over hours with valid BFS measurements.
 
-    A positive offset means the model is underestimating UV relative to
-    what a BFS-like station would measure at the target altitude.
+    Returns (offset, n_hours_matched). A positive offset means the model is
+    underestimating UV relative to what a BFS-like station would measure at
+    the target altitude.
     """
     fused_lookup = {p.hour: p for p in fused}
     bfs_lookup = {p.hour: p for p in bfs_fetch.hourly}
@@ -136,5 +175,5 @@ def _compute_bfs_offset(
         deltas.append(bfs_at_target - fused_uv)
 
     if not deltas:
-        return None
-    return sum(deltas) / len(deltas)
+        return None, 0
+    return sum(deltas) / len(deltas), len(deltas)
