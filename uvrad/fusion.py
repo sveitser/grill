@@ -13,20 +13,20 @@ Why BFS is calibration-only (not averaged in):
 """
 
 from uvrad.altitude import correct_uv
-from uvrad.models import HourlyPoint, Location, SourceFetch
+from uvrad.models import HourlyPoint, Location, SourceFetch, UVDataUnavailableError
 from uvrad.sources.bfs import SCHAUINSLAND_ALT_M
 
 # Relative weights for model sources (renormalized if a source fails)
 SOURCE_WEIGHTS: dict[str, float] = {
-    "Open-Meteo ICON": 0.50,
-    "Open-Meteo CAMS": 0.50,
+    "Open-Meteo Global": 0.50,
+    "Open-Meteo ECMWF": 0.50,
+    "MeteoSwiss ICON-CH2": 0.50,
 }
 
 
 def fuse(
     location: Location,
-    icon_fetch: SourceFetch,
-    cams_fetch: SourceFetch,
+    *model_fetches: SourceFetch,
     bfs_fetch: SourceFetch | None = None,
 ) -> tuple[list[HourlyPoint], list[str], dict[str, float], float | None]:
     """Fuse source data into a single altitude-corrected hourly series.
@@ -36,20 +36,18 @@ def fuse(
         sources_used: names of sources that contributed
         weights: effective weight per source
         bfs_offset: mean(bfs_corrected - fused) over available hours, or None
+
+    Raises:
+        UVDataUnavailableError: if no model source returned usable UV data
     """
     available: list[tuple[SourceFetch, float]] = []
-    for fetch in [icon_fetch, cams_fetch]:
+    for fetch in model_fetches:
         if fetch.ok and fetch.hourly:
             w = SOURCE_WEIGHTS.get(fetch.name, 0.5)
             available.append((fetch, w))
 
     if not available:
-        # No model data — return zeros
-        empty = [
-            HourlyPoint(hour=h, uv_index=0.0, uv_index_clear_sky=0.0, cloud_cover_pct=0.0)
-            for h in range(24)
-        ]
-        return empty, [], {}, None
+        raise UVDataUnavailableError(list(model_fetches))
 
     # Normalize weights
     total_w = sum(w for _, w in available)

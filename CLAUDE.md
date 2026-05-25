@@ -52,8 +52,8 @@ tests/
 
 | Source | Role | Auth |
 |--------|------|------|
-| Open-Meteo Global (best_match) | Primary — 50% weight | None |
-| Open-Meteo ECMWF IFS 0.25° | Secondary — 50% weight | None |
+| Open-Meteo ICON seamless (MeteoSwiss) | Primary — 50% weight | None |
+| Open-Meteo CAMS Europe (Copernicus) | Secondary — 50% weight | None |
 | BFS Schauinsland (~60km SSW of Basel, 1284m) | Calibration offset only | None (scrape) |
 
 Open-Meteo returns `uv_index` (cloud-corrected by the model) and `uv_index_clear_sky`.

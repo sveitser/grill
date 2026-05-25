@@ -9,11 +9,12 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 
+from uvrad._version import VERSION
 from uvrad.config import DEFAULT
 from uvrad.estimate import get_uv_estimate
-from uvrad.models import Location, uv_category
+from uvrad.models import Location, UVDataUnavailableError, uv_category
 
 _cache: dict[str, tuple[float, dict]] = {}  # key → (expires_at, payload)
 CACHE_TTL = 300  # 5 minutes
@@ -48,9 +49,14 @@ app = FastAPI(
 )
 
 
+@app.get("/")
+def index() -> FileResponse:
+    return FileResponse("api/index.html", media_type="text/html")
+
+
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "version": VERSION}
 
 
 @app.get("/uv")
@@ -76,10 +82,20 @@ def get_uv(
     if cached:
         return JSONResponse(content=cached, headers={"X-Cache": "HIT"})
 
-    est = get_uv_estimate(location=loc, include_bfs=bfs)
+    try:
+        est = get_uv_estimate(location=loc, include_bfs=bfs)
+    except UVDataUnavailableError as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": str(exc),
+                "source_errors": {s.name: s.error for s in exc.failed_sources},
+            },
+        )
     cat, advice = uv_category(est.current_uv)
 
     payload = {
+        "version": VERSION,
         "location": {
             "lat": est.location.lat,
             "lon": est.location.lon,
@@ -106,6 +122,7 @@ def get_uv(
         ],
         "sources_used": est.sources_used,
         "source_weights": est.source_weights,
+        "source_errors": est.source_errors,
         "bfs_offset": est.bfs_offset,
         "computed_at": est.computed_at.isoformat(),
     }
