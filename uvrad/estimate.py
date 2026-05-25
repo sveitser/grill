@@ -13,7 +13,7 @@ from uvrad.fusion import fuse
 from uvrad.models import Location, UVEstimate
 from uvrad.solar import interpolate_current_uv, solar_zenith_deg, solar_zenith_series
 from uvrad.sources.bfs import fetch_bfs_schauinsland
-from uvrad.sources.open_meteo import fetch_cams, fetch_icon
+from uvrad.sources.open_meteo import fetch_cams, fetch_icon, fetch_meteoswiss
 
 
 def get_uv_estimate(
@@ -30,17 +30,23 @@ def get_uv_estimate(
     """
     loc: Location = location if location is not None else config.default_location
 
-    # Fetch from model sources (these are the fast/reliable ones)
+    # Fetch from model sources in parallel would be nicer, but sequential is simple and correct
     icon_fetch = fetch_icon(loc, timeout=config.http_timeout)
     cams_fetch = fetch_cams(loc, timeout=config.http_timeout)
+    meteoswiss_fetch = fetch_meteoswiss(loc, timeout=config.http_timeout)
 
     # BFS scraping is slower and may fail — don't block on it
     bfs_fetch = None
     if include_bfs:
         bfs_fetch = fetch_bfs_schauinsland(timeout=config.bfs_timeout)
 
-    # Fuse into a single hourly series
-    hourly, sources_used, weights, bfs_offset = fuse(loc, icon_fetch, cams_fetch, bfs_fetch)
+    # Fuse into a single hourly series; raises UVDataUnavailableError if all sources fail
+    hourly, sources_used, weights, bfs_offset = fuse(
+        loc, icon_fetch, cams_fetch, meteoswiss_fetch, bfs_fetch=bfs_fetch
+    )
+
+    all_model_fetches = [icon_fetch, cams_fetch, meteoswiss_fetch]
+    source_errors = {f.name: f.error for f in all_model_fetches if not f.ok and f.error}
 
     # Current time in local timezone
     now = datetime.now(tz=pd.Timestamp.now(tz="Europe/Zurich").tz)
@@ -83,4 +89,5 @@ def get_uv_estimate(
         source_weights=weights,
         bfs_offset=round(bfs_offset, 2) if bfs_offset is not None else None,
         computed_at=now,
+        source_errors=source_errors,
     )
