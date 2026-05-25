@@ -1,5 +1,5 @@
 ---
-title: UV Radiation Index
+title: uvrad
 emoji: ☀️
 colorFrom: yellow
 colorTo: orange
