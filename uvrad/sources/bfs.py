@@ -113,11 +113,16 @@ def fetch_bfs_best(timeout: float = 15.0) -> SourceFetch:
 
 
 def _fetch_bfs_wfs(station_id: str, name: str, station_alt_m: float, timeout: float) -> SourceFetch:
-    """Fetch UV data from IMIS WFS API for a given station."""
+    """Fetch UV data from IMIS WFS API for a given station.
+
+    Tries two request variants:
+      1. With CQL_FILTER by station_id (server-side filter)
+      2. Without filter — fetch all stations, filter client-side
+         (fallback in case the server rejects the CQL filter)
+    """
     t0 = time.monotonic()
-    try:
-        # Request today's data — fetch last 50 features sorted by time descending
-        params = {
+    attempts = [
+        {
             "service": "WFS",
             "version": "1.1.0",
             "request": "GetFeature",
@@ -125,75 +130,170 @@ def _fetch_bfs_wfs(station_id: str, name: str, station_alt_m: float, timeout: fl
             "outputFormat": "application/json",
             "CQL_FILTER": f"station_id='{station_id}'",
             "maxFeatures": "60",
-            "sortBy": "end_measure D",
-        }
-        resp = httpx.get(WFS_BASE_URL, params=params, timeout=timeout, follow_redirects=True)
-        latency_ms = (time.monotonic() - t0) * 1000
-        resp.raise_for_status()
+        },
+        # No CQL filter — server may not support it; filter client-side
+        {
+            "service": "WFS",
+            "version": "1.1.0",
+            "request": "GetFeature",
+            "typeName": WFS_TYPENAME,
+            "outputFormat": "application/json",
+            "maxFeatures": "200",
+        },
+    ]
 
-        data = resp.json()
-        features = data.get("features", [])
-        logger.debug("WFS %s: got %d features", station_id, len(features))
+    last_error = "no attempts made"
+    for attempt_idx, params in enumerate(attempts):
+        try:
+            resp = httpx.get(WFS_BASE_URL, params=params, timeout=timeout, follow_redirects=True)
+            latency_ms = (time.monotonic() - t0) * 1000
 
-        if not features:
-            # Log a sample of properties from another station attempt
-            logger.warning(
-                "WFS returned 0 features for %s. Response keys: %s", station_id, list(data.keys())
+            if not resp.is_success:
+                logger.warning(
+                    "WFS HTTP %d for %s (attempt %d): %r",
+                    resp.status_code,
+                    station_id,
+                    attempt_idx,
+                    resp.text[:300],
+                )
+                last_error = f"HTTP {resp.status_code}"
+                continue
+
+            body = resp.text.strip()
+            if not body:
+                logger.warning("WFS empty response for %s (attempt %d)", station_id, attempt_idx)
+                last_error = "empty response"
+                continue
+
+            try:
+                data = resp.json()
+            except Exception as json_err:
+                logger.warning(
+                    "WFS non-JSON for %s (attempt %d): %s | body[:400]=%r",
+                    station_id,
+                    attempt_idx,
+                    json_err,
+                    body[:400],
+                )
+                last_error = f"non-JSON response: {body[:120]!r}"
+                continue
+
+            features = data.get("features", [])
+            logger.debug(
+                "WFS %s attempt %d: got %d features", station_id, attempt_idx, len(features)
             )
-            return SourceFetch(
-                name=name,
-                ok=False,
-                error="No features returned from WFS",
-                latency_ms=latency_ms,
-                station_alt_m=station_alt_m,
-            )
 
-        # Log property names from first feature to help diagnose unknown fields
-        sample_props = features[0].get("properties", {}) if features else {}
-        logger.debug("WFS %s sample properties: %s", station_id, list(sample_props.keys()))
+            if not features:
+                logger.warning(
+                    "WFS 0 features for %s (attempt %d). Top-level keys: %s",
+                    station_id,
+                    attempt_idx,
+                    list(data.keys()),
+                )
+                last_error = "0 features returned"
+                continue
 
-        points = _parse_wfs_features(features, station_id)
-        if not points:
-            logger.warning(
-                "WFS %s: could not parse UV from properties %s",
+            # On the no-filter attempt, narrow to this station client-side
+            if attempt_idx == 1:
+                features = _filter_features_by_station(features, station_id)
+                logger.debug(
+                    "WFS %s after client-side filter: %d features", station_id, len(features)
+                )
+                if not features:
+                    # Log all distinct station IDs we saw so we can fix the ID
+                    all_ids = _collect_station_ids(data.get("features", []))
+                    logger.warning(
+                        "WFS no features matching %s. Station IDs in response: %s",
+                        station_id,
+                        all_ids[:20],
+                    )
+                    last_error = (
+                        f"no features matching station_id {station_id!r}; seen: {all_ids[:5]}"
+                    )
+                    continue
+
+            sample_props = features[0].get("properties", {})
+            logger.debug(
+                "WFS %s sample properties: %s | values: %s",
                 station_id,
                 list(sample_props.keys()),
+                {k: v for k, v in list(sample_props.items())[:6]},
             )
+
+            points = _parse_wfs_features(features, station_id)
+            if not points:
+                logger.warning(
+                    "WFS %s: could not parse UV from properties %s",
+                    station_id,
+                    list(sample_props.keys()),
+                )
+                last_error = f"could not parse UV from props {list(sample_props.keys())}"
+                continue
+
             return SourceFetch(
                 name=name,
-                ok=False,
-                error=f"Could not parse UV from WFS properties: {list(sample_props.keys())}",
+                ok=True,
+                hourly=points,
                 latency_ms=latency_ms,
                 station_alt_m=station_alt_m,
             )
 
-        return SourceFetch(
-            name=name,
-            ok=True,
-            hourly=points,
-            latency_ms=latency_ms,
-            station_alt_m=station_alt_m,
-        )
+        except httpx.TimeoutException:
+            latency_ms = (time.monotonic() - t0) * 1000
+            return SourceFetch(
+                name=name,
+                ok=False,
+                error="WFS timeout",
+                latency_ms=latency_ms,
+                station_alt_m=station_alt_m,
+            )
+        except Exception as e:
+            logger.exception("WFS fetch failed for %s (attempt %d)", station_id, attempt_idx)
+            last_error = f"exception: {e}"
+            continue
 
-    except httpx.TimeoutException:
-        latency_ms = (time.monotonic() - t0) * 1000
-        return SourceFetch(
-            name=name,
-            ok=False,
-            error="WFS timeout",
-            latency_ms=latency_ms,
-            station_alt_m=station_alt_m,
-        )
-    except Exception as e:
-        latency_ms = (time.monotonic() - t0) * 1000
-        logger.exception("WFS fetch failed for %s", station_id)
-        return SourceFetch(
-            name=name,
-            ok=False,
-            error=f"WFS error: {e}",
-            latency_ms=latency_ms,
-            station_alt_m=station_alt_m,
-        )
+    return SourceFetch(
+        name=name,
+        ok=False,
+        error=f"WFS: {last_error}",
+        latency_ms=(time.monotonic() - t0) * 1000,
+        station_alt_m=station_alt_m,
+    )
+
+
+def _filter_features_by_station(features: list[dict], station_id: str) -> list[dict]:
+    """Filter GeoJSON features to those matching station_id (tries multiple property names)."""
+    station_id_lower = station_id.lower()
+    for prop in _STATION_PROP_CANDIDATES:
+        matched = [
+            f
+            for f in features
+            if str(f.get("properties", {}).get(prop, "")).lower() == station_id_lower
+        ]
+        if matched:
+            return matched
+    # Substring match as last resort
+    for prop in _STATION_PROP_CANDIDATES:
+        matched = [
+            f
+            for f in features
+            if station_id_lower in str(f.get("properties", {}).get(prop, "")).lower()
+        ]
+        if matched:
+            return matched
+    return []
+
+
+def _collect_station_ids(features: list[dict]) -> list[str]:
+    """Extract unique station ID values from features for diagnostic logging."""
+    seen: set[str] = set()
+    for feat in features:
+        props = feat.get("properties", {})
+        for prop in _STATION_PROP_CANDIDATES:
+            val = props.get(prop)
+            if val is not None:
+                seen.add(str(val))
+    return sorted(seen)
 
 
 def _parse_wfs_features(features: list[dict], station_id: str) -> list[HourlyPoint]:
