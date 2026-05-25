@@ -50,13 +50,15 @@ jobs:
       - run: uv run pytest tests/ -v
 
   deploy:
-    name: Deploy (fly.io)
+    name: Deploy (Hugging Face Spaces)
     needs: [lint, format, typecheck, test]
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - run: flyctl deploy --remote-only
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        with:
+          fetch-depth: 0
+      - name: Push to Hugging Face Spaces
+        run: |
+          git remote add hf https://sveitser:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/sveitser/grill
+          git push hf HEAD:main --force
