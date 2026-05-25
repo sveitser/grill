@@ -1,13 +1,11 @@
 """Open-Meteo API fetcher.
 
-Fetches hourly UV index forecasts for today using three model calls:
-- GFS global (default/best_match): primary UV source, always includes uv_index
-- ECMWF IFS 0.25°: secondary UV source for cross-checking
-- MeteoSwiss ICON-CH2: 1 km Swiss grid via dedicated endpoint
+Fetches hourly UV index forecasts for today using two model calls:
+- best_match (default): primary UV source; Open-Meteo selects ICON-EU for Basel
+- gfs_seamless: US GFS + HRRR blend; genuinely different from ICON-EU
 
-ICON seamless and CAMS Europe do not expose uv_index via Open-Meteo
-(they return null). UV index is available from their global blend or
-explicitly from ECMWF IFS.
+ECMWF IFS (ecmwf_ifs025) does not expose uv_index via Open-Meteo.
+ICON seamless and CAMS Europe also return null for uv_index.
 
 Open-Meteo outputs are treated as sea-level equivalent;
 altitude correction is applied separately in fusion.py.
@@ -21,10 +19,9 @@ import httpx
 from uvrad.models import HourlyPoint, Location, SourceFetch
 
 BASE_URL = "https://api.open-meteo.com/v1/forecast"
-METEOSWISS_URL = "https://api.open-meteo.com/v1/meteoswiss"
 
 
-def _build_url(location: Location, model: str | None, base_url: str = BASE_URL) -> str:
+def _build_url(location: Location, model: str | None) -> str:
     today = date.today().isoformat()
     model_param = f"&models={model}" if model else ""
     params = (
@@ -35,7 +32,7 @@ def _build_url(location: Location, model: str | None, base_url: str = BASE_URL) 
         f"{model_param}"
         f"&timezone=Europe%2FZurich"
     )
-    return f"{base_url}?{params}"
+    return f"{BASE_URL}?{params}"
 
 
 def _parse_response(data: dict) -> list[HourlyPoint]:
@@ -65,24 +62,13 @@ def _parse_response(data: dict) -> list[HourlyPoint]:
 
 
 def fetch_icon(location: Location, timeout: float = 12.0) -> SourceFetch:
-    """Fetch UV from Open-Meteo default global model (best_match includes ECMWF UV)."""
+    """Fetch UV from Open-Meteo best_match (selects ICON-EU for Basel)."""
     return _fetch(location, model=None, name="Open-Meteo Global", timeout=timeout)
 
 
-def fetch_cams(location: Location, timeout: float = 12.0) -> SourceFetch:
-    """Fetch UV from Open-Meteo ECMWF IFS 0.25° model."""
-    return _fetch(location, model="ecmwf_ifs025", name="Open-Meteo ECMWF", timeout=timeout)
-
-
-def fetch_meteoswiss(location: Location, timeout: float = 12.0) -> SourceFetch:
-    """Fetch UV from Open-Meteo MeteoSwiss ICON-CH2 (1 km Switzerland grid)."""
-    return _fetch(
-        location,
-        model=None,
-        name="MeteoSwiss ICON-CH2",
-        timeout=timeout,
-        base_url=METEOSWISS_URL,
-    )
+def fetch_gfs(location: Location, timeout: float = 12.0) -> SourceFetch:
+    """Fetch UV from Open-Meteo GFS Seamless (NCEP GFS + HRRR blend)."""
+    return _fetch(location, model="gfs_seamless", name="Open-Meteo GFS", timeout=timeout)
 
 
 def _fetch(
@@ -90,9 +76,8 @@ def _fetch(
     model: str | None,
     name: str,
     timeout: float,
-    base_url: str = BASE_URL,
 ) -> SourceFetch:
-    url = _build_url(location, model, base_url)
+    url = _build_url(location, model)
     t0 = time.monotonic()
     try:
         resp = httpx.get(url, timeout=timeout)
