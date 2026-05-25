@@ -28,8 +28,10 @@ def test_solar_zenith_midnight_basel():
 
 def test_interpolate_returns_zero_at_night():
     # All hourly points show zero UV (night)
-    hourly = [HourlyPoint(hour=h, uv_index=0.0, uv_index_clear_sky=0.0, cloud_cover_pct=0.0)
-              for h in range(24)]
+    hourly = [
+        HourlyPoint(hour=h, uv_index=0.0, uv_index_clear_sky=0.0, cloud_cover_pct=0.0)
+        for h in range(24)
+    ]
     # 2 AM local time (UTC midnight)
     now = datetime(2024, 6, 21, 0, 0, tzinfo=UTC)
     result = interpolate_current_uv(hourly, BASEL_LAT, BASEL_LON, now)
@@ -60,9 +62,10 @@ def test_interpolate_empty_hourly():
 
 def test_interpolate_never_negative():
     """Interpolation should never return negative UV values."""
-    hourly = [HourlyPoint(hour=h, uv_index=float(h % 3) * 2, uv_index_clear_sky=0.0,
-                          cloud_cover_pct=0.0)
-              for h in range(24)]
+    hourly = [
+        HourlyPoint(hour=h, uv_index=float(h % 3) * 2, uv_index_clear_sky=0.0, cloud_cover_pct=0.0)
+        for h in range(24)
+    ]
     now = datetime(2024, 6, 21, 11, 30, tzinfo=UTC)
     result = interpolate_current_uv(hourly, BASEL_LAT, BASEL_LON, now)
     assert result >= 0.0

@@ -26,7 +26,9 @@ def solar_zenith_deg(lat: float, lon: float, dt: datetime) -> float:
     return float(pos["zenith"].iloc[0])
 
 
-def solar_zenith_series(lat: float, lon: float, day: date, tz: str = "Europe/Zurich") -> list[float]:
+def solar_zenith_series(
+    lat: float, lon: float, day: date, tz: str = "Europe/Zurich"
+) -> list[float]:
     """Return list of 24 solar zenith angles (hourly, local midnight to 23:00)."""
     times = pd.date_range(
         start=f"{day} 00:00",

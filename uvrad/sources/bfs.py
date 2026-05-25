@@ -51,7 +51,9 @@ def fetch_bfs_schauinsland(timeout: float = 15.0) -> SourceFetch:
         )
     except httpx.TimeoutException:
         latency_ms = (time.monotonic() - t0) * 1000
-        return SourceFetch(name="BFS Schauinsland", ok=False, error="Timeout", latency_ms=latency_ms)
+        return SourceFetch(
+            name="BFS Schauinsland", ok=False, error="Timeout", latency_ms=latency_ms
+        )
     except Exception as e:
         latency_ms = (time.monotonic() - t0) * 1000
         return SourceFetch(name="BFS Schauinsland", ok=False, error=str(e), latency_ms=latency_ms)
