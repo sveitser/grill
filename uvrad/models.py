@@ -67,6 +67,7 @@ class SourceFetch:
     name: str
     ok: bool
     hourly: list[HourlyPoint] = field(default_factory=list)
+    tomorrow_hourly: list[HourlyPoint] = field(default_factory=list)
     error: str | None = None
     latency_ms: float = 0.0
     station_alt_m: float | None = (
@@ -80,6 +81,7 @@ class UVEstimate:
     current_uv: float  # interpolated, cloud+altitude corrected
     current_uv_clear_sky: float
     hourly: list[HourlyPoint]  # full day, altitude-corrected
+    tomorrow_hourly: list[HourlyPoint]  # next day forecast, altitude-corrected
     solar_zenith_deg: float
     is_daytime: bool
     sources_used: list[str]

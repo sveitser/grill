@@ -87,7 +87,7 @@
       margin-bottom: 0.7rem;
     }
 
-    #uv-chart { width: 100% !important; height: 220px !important; }
+    #uv-chart, #uv-chart-tomorrow { width: 100% !important; height: 220px !important; }
 
     /* ── Info card ── */
     #info {
@@ -171,8 +171,13 @@
     </section>
 
     <div class="card">
-      <div class="card-title">Today's UV forecast</div>
+      <div class="card-title" id="today-chart-title">Today's UV forecast</div>
       <canvas id="uv-chart"></canvas>
+    </div>
+
+    <div class="card" id="tomorrow-card" style="display:none">
+      <div class="card-title" id="tomorrow-chart-title">Tomorrow's UV forecast</div>
+      <canvas id="uv-chart-tomorrow"></canvas>
     </div>
 
     <div class="card" id="info">
@@ -209,66 +214,38 @@ function heroClass(uv, isDay) {
   return 'hero-extreme';
 }
 
-// Custom Chart.js plugin: dashed vertical line at current hour
-let _nowIdx = -1;
-const nowLinePlugin = {
-  id: 'nowLine',
-  afterDraw(chart) {
-    if (_nowIdx < 0) return;
-    const { ctx, chartArea, scales } = chart;
-    const x = scales.x.getPixelForValue(_nowIdx);
-    ctx.save();
-    ctx.strokeStyle = 'rgba(200,30,30,0.7)';
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath();
-    ctx.moveTo(x, chartArea.top);
-    ctx.lineTo(x, chartArea.bottom);
-    ctx.stroke();
-    ctx.restore();
-  }
-};
-
 let _chart = null;
+let _chart2 = null;
 
-function render(data) {
-  const loc = data.location;
-  const cur = data.current;
-  const hourly = data.hourly;
-
-  // Header: location + time
-  const name = loc.name || `${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)}`;
-  document.title = `UV Index — ${name}`;
-  document.getElementById('location-name').textContent = name;
-
-  // Parse time from computed_at ISO string (already in local tz)
-  const at = data.computed_at; // e.g. "2026-05-25T13:45:23.456+02:00"
-  document.getElementById('datetime').textContent =
-    at.substring(0, 10) + '  ' + at.substring(11, 16);
-
-  // Hero
-  const uv = cur.uv_index;
-  document.getElementById('uv-number').textContent = uv.toFixed(1);
-  document.getElementById('uv-label').textContent = cur.category;
-  document.getElementById('uv-advice').textContent = cur.advice;
-  document.getElementById('hero').className = heroClass(uv, cur.is_daytime);
-
-  // Current hour (from ISO string, already local time)
-  const currentHour = parseInt(at.substring(11, 13), 10);
+function buildChart(canvasId, hourly, nowIdx) {
   const hours = hourly.map(p => p.hour);
-  _nowIdx = hours.indexOf(currentHour);
-
-  // Chart datasets
   const labels = hours.map(h => `${h}h`);
   const uvVals = hourly.map(p => p.uv_index);
   const csVals = hourly.map(p => p.uv_index_clear_sky);
   const cloudVals = hourly.map(p => p.cloud_cover_pct);
   const maxUV = Math.max(1, ...uvVals, ...csVals);
 
-  const ctx = document.getElementById('uv-chart').getContext('2d');
-  if (_chart) _chart.destroy();
-  _chart = new Chart(ctx, {
-    plugins: [nowLinePlugin],
+  const pluginNowLine = {
+    id: 'nowLine',
+    afterDraw(chart) {
+      if (nowIdx < 0) return;
+      const { ctx, chartArea, scales } = chart;
+      const x = scales.x.getPixelForValue(nowIdx);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(200,30,30,0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x, chartArea.top);
+      ctx.lineTo(x, chartArea.bottom);
+      ctx.stroke();
+      ctx.restore();
+    }
+  };
+
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  return new Chart(ctx, {
+    plugins: [pluginNowLine],
     data: {
       labels,
       datasets: [
@@ -349,6 +326,57 @@ function render(data) {
       },
     },
   });
+}
+
+function render(data) {
+  const loc = data.location;
+  const cur = data.current;
+  const hourly = data.hourly;
+
+  // Header: location + time
+  const name = loc.name || `${loc.lat.toFixed(3)}, ${loc.lon.toFixed(3)}`;
+  document.title = `UV Index — ${name}`;
+  document.getElementById('location-name').textContent = name;
+
+  // Parse time from computed_at ISO string (already in local tz)
+  const at = data.computed_at; // e.g. "2026-05-25T13:45:23.456+02:00"
+  document.getElementById('datetime').textContent =
+    at.substring(0, 10) + '  ' + at.substring(11, 16);
+
+  // Hero
+  const uv = cur.uv_index;
+  document.getElementById('uv-number').textContent = uv.toFixed(1);
+  document.getElementById('uv-label').textContent = cur.category;
+  document.getElementById('uv-advice').textContent = cur.advice;
+  document.getElementById('hero').className = heroClass(uv, cur.is_daytime);
+
+  // Current hour (from ISO string, already local time)
+  const currentHour = parseInt(at.substring(11, 13), 10);
+  const todayHours = hourly.map(p => p.hour);
+  const nowIdx = todayHours.indexOf(currentHour);
+
+  // Today's date label
+  const todayDate = at.substring(0, 10);
+  document.getElementById('today-chart-title').textContent = `Today's UV forecast  · ${todayDate}`;
+
+  if (_chart) _chart.destroy();
+  _chart = buildChart('uv-chart', hourly, nowIdx);
+
+  // Tomorrow's chart
+  const tomorrow = data.tomorrow_hourly;
+  const tomorrowCard = document.getElementById('tomorrow-card');
+  if (tomorrow && tomorrow.length) {
+    const tomorrowDate = new Date(at.substring(0, 10));
+    tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+    const tomorrowStr = tomorrowDate.toISOString().substring(0, 10);
+    document.getElementById('tomorrow-chart-title').textContent =
+      `Tomorrow's UV forecast  · ${tomorrowStr}`;
+    if (_chart2) _chart2.destroy();
+    _chart2 = buildChart('uv-chart-tomorrow', tomorrow, -1);
+    tomorrowCard.style.display = '';
+  } else {
+    tomorrowCard.style.display = 'none';
+  }
 
   // Computation card
   renderComputation(data.computation);

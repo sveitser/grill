@@ -170,6 +170,16 @@ def get_uv(
             }
             for p in est.hourly
         ],
+        "tomorrow_hourly": [
+            {
+                "hour": p.hour,
+                "uv_index": p.uv_index,
+                "uv_index_clear_sky": p.uv_index_clear_sky,
+                "cloud_cover_pct": p.cloud_cover_pct,
+                "solar_zenith_deg": p.solar_zenith_deg,
+            }
+            for p in est.tomorrow_hourly
+        ],
         "sources_used": est.sources_used,
         "source_weights": est.source_weights,
         "source_errors": est.source_errors,

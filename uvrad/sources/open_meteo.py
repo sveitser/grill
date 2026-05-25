@@ -12,7 +12,7 @@ altitude correction is applied separately in fusion.py.
 """
 
 import time
-from datetime import date
+from datetime import date, timedelta
 
 import httpx
 
@@ -23,19 +23,20 @@ BASE_URL = "https://api.open-meteo.com/v1/forecast"
 
 def _build_url(location: Location, model: str | None) -> str:
     today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
     model_param = f"&models={model}" if model else ""
     params = (
         f"latitude={location.lat}"
         f"&longitude={location.lon}"
         f"&hourly=uv_index,uv_index_clear_sky,cloud_cover"
-        f"&start_date={today}&end_date={today}"
+        f"&start_date={today}&end_date={tomorrow}"
         f"{model_param}"
         f"&timezone=Europe%2FZurich"
     )
     return f"{BASE_URL}?{params}"
 
 
-def _parse_response(data: dict) -> list[HourlyPoint]:
+def _parse_response(data: dict, target_date: str | None = None) -> list[HourlyPoint]:
     hourly = data.get("hourly", {})
     times = hourly.get("time", [])
     uv = hourly.get("uv_index", [])
@@ -44,6 +45,8 @@ def _parse_response(data: dict) -> list[HourlyPoint]:
 
     points = []
     for i, t in enumerate(times):
+        if target_date and not t.startswith(target_date):
+            continue
         hour = int(t[11:13])
         uv_val = float(uv[i]) if uv[i] is not None else 0.0
         uv_cs_val = float(uv_cs[i]) if uv_cs[i] is not None else 0.0
@@ -78,18 +81,27 @@ def _fetch(
     timeout: float,
 ) -> SourceFetch:
     url = _build_url(location, model)
+    today = date.today().isoformat()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
     t0 = time.monotonic()
     try:
         resp = httpx.get(url, timeout=timeout)
         latency_ms = (time.monotonic() - t0) * 1000
         resp.raise_for_status()
         data = resp.json()
-        points = _parse_response(data)
-        if not points:
+        today_points = _parse_response(data, target_date=today)
+        tomorrow_points = _parse_response(data, target_date=tomorrow)
+        if not today_points:
             return SourceFetch(
                 name=name, ok=False, error="No UV data in response", latency_ms=latency_ms
             )
-        return SourceFetch(name=name, ok=True, hourly=points, latency_ms=latency_ms)
+        return SourceFetch(
+            name=name,
+            ok=True,
+            hourly=today_points,
+            tomorrow_hourly=tomorrow_points,
+            latency_ms=latency_ms,
+        )
     except httpx.TimeoutException:
         latency_ms = (time.monotonic() - t0) * 1000
         return SourceFetch(name=name, ok=False, error="Timeout", latency_ms=latency_ms)

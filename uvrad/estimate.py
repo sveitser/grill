@@ -4,7 +4,7 @@ Orchestrates fetching from all sources, fusion, solar interpolation,
 and returns a complete UVEstimate for a given location and time.
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -18,7 +18,9 @@ from uvrad.models import (
     HourlyPoint,
     Location,
     SourceContribution,
+    SourceFetch,
     UVEstimate,
+    UVDataUnavailableError,
 )
 from uvrad.solar import (
     interpolate_current_uv,
@@ -70,6 +72,29 @@ def get_uv_estimate(
     zeniths = solar_zenith_series(loc.lat, loc.lon, day, tz="Europe/Zurich")
     for point, z in zip(fused.hourly, zeniths, strict=False):
         point.solar_zenith_deg = z
+
+    # Tomorrow's forecast (model-only, no BFS — future data)
+    tomorrow_hourly: list[HourlyPoint] = []
+    icon_tmr = SourceFetch(
+        name=icon_fetch.name,
+        ok=icon_fetch.ok and bool(icon_fetch.tomorrow_hourly),
+        hourly=icon_fetch.tomorrow_hourly,
+    )
+    gfs_tmr = SourceFetch(
+        name=gfs_fetch.name,
+        ok=gfs_fetch.ok and bool(gfs_fetch.tomorrow_hourly),
+        hourly=gfs_fetch.tomorrow_hourly,
+    )
+    if icon_tmr.ok or gfs_tmr.ok:
+        try:
+            tomorrow_fused = fuse(loc, icon_tmr, gfs_tmr, bfs_fetch=None)
+            tomorrow_date = day + timedelta(days=1)
+            tomorrow_zeniths = solar_zenith_series(loc.lat, loc.lon, tomorrow_date, tz="Europe/Zurich")
+            for point, z in zip(tomorrow_fused.hourly, tomorrow_zeniths, strict=False):
+                point.solar_zenith_deg = z
+            tomorrow_hourly = tomorrow_fused.hourly
+        except UVDataUnavailableError:
+            pass
 
     current_uv, interp_trace = interpolate_current_uv_traced(fused.hourly, loc.lat, loc.lon, now)
 
@@ -138,6 +163,7 @@ def get_uv_estimate(
         current_uv=round(current_uv, 2),
         current_uv_clear_sky=round(current_uv_cs, 2),
         hourly=fused.hourly,
+        tomorrow_hourly=tomorrow_hourly,
         solar_zenith_deg=round(zenith, 1),
         is_daytime=is_day,
         sources_used=fused.sources_used,
