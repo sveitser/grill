@@ -1,72 +1,65 @@
-"""BFS UV ground-station data via IMIS WFS API.
+"""BFS UV ground-station data.
 
-The German Federal Office for Radiation Protection (BFS) operates UV measurement
-stations. We query the nearest station to Basel via the IMIS WFS API:
+Primary: parse the live chart PNG at uvi.bfs.de — gives ~30-minute UV readings
+for the current day.  Fallback: query the WFS uv_index_timeseries layer for the
+daily peak (one integer per day).
 
-  Schauinsland: station_id="SL", ~30km SSE of Basel, 1206m altitude
+Chart PNG URL pattern:
+  https://uvi.bfs.de/Tagesgrafiken/EEr_{StationName}_today.png
+  e.g. EEr_Schauinsland_today.png  (updated every 6 minutes)
 
-Station discovery:
-  1. Query opendata:uv_index_tagesverlauf to get all 35 stations with metadata
-  2. Find station named "Schauinsland" (or fall back to nearest to Basel)
-  3. Use its short station_id to query opendata:abi_30min for UV readings
+PNG pixel layout (640×480, fixed Highcharts template):
+  X_AXIS_START=105 (hour 6:00), X_AXIS_END=578 (hour 21:00)
+  Y_BOTTOM=427 (UV=0 baseline), Y_TOP=68 (UV=9 top gridline)
+  Bars are adjacent with no gaps; data ends where bars stop.
+  Timestamp indicator box (dark blue) sits at y<72, top-right corner.
 
-opendata:abi_30min contains current 30-minute UV readings during daylight hours.
-At night it returns 0 features — this is correct (no UV when sun is down).
-
-Falls back to HTML scraping on the old bfs.de Schauinsland page if WFS fails.
+WFS layers at https://www.imis.bfs.de/ogc/opendata/ows:
+  opendata:uv_index_tagesverlauf  — station metadata (lat/lon/alt, 35 stations)
+  opendata:uv_index_timeseries    — daily peak, one record/day per station;
+                                    requires viewparams=station_id:<id>
+  (Sub-daily data is NOT in the WFS — the PNG chart is the only source.)
 """
 
 import datetime as dt
+import io
 import logging
 import math
-import re
 import time
 
 import httpx
-from bs4 import BeautifulSoup
 
 from uvrad.models import HourlyPoint, SourceFetch
 
 logger = logging.getLogger(__name__)
 
 WFS_BASE_URL = "https://www.imis.bfs.de/ogc/opendata/ows"
-WFS_UV_LAYER = "opendata:abi_30min"
-WFS_STATION_LAYER = "opendata:uv_index_tagesverlauf"
+WFS_STATIONS_LAYER = "opendata:uv_index_tagesverlauf"
+WFS_TIMESERIES_LAYER = "opendata:uv_index_timeseries"
+PNG_BASE_URL = "https://uvi.bfs.de/Tagesgrafiken"
 
-# Basel coordinates for nearest-station fallback
 _BASEL_LAT = 47.5596
 _BASEL_LON = 7.5886
 
-# Known defaults (used when WFS station discovery fails)
 _DEFAULT_STATION_ID = "SL"
 _DEFAULT_STATION_NAME = "Schauinsland"
 _DEFAULT_STATION_ALT_M = 1206.0
 
-BFS_SCHAUINSLAND_URL = (
-    "https://www.bfs.de/DE/themen/opt/uv/uv-index/aktuelle-tagesverlaeufe"
-    "/_documents/schauinsland_node.html"
-)
+# PNG chart pixel calibration (derived from live 640×480 chart)
+_PNG_X_START = 105    # x-pixel at hour 6:00
+_PNG_X_END = 578      # x-pixel at hour 21:00 (right axis)
+_PNG_Y_BOTTOM = 427   # y-pixel = UV 0 (baseline)
+_PNG_Y_TOP = 68       # y-pixel = UV 9 (top gridline)
+_PNG_UV_MAX = 9.0
+_PNG_PX_PER_HOUR = (_PNG_X_END - _PNG_X_START) / 15.0  # 15 hours (6–21)
 
-# Keep legacy constants for import compatibility
+# Legacy constants kept for import compatibility
 SCHAUINSLAND_ALT_M = _DEFAULT_STATION_ALT_M
 FREIBURG_ALT_M = 278.0
 SCHAUINSLAND_STATION_ID = _DEFAULT_STATION_ID
 FREIBURG_STATION_ID = "FREI"
-BFS_URL = BFS_SCHAUINSLAND_URL
-
-# Candidate property names in abi_30min features (tried in order)
-_UV_PROP_CANDIDATES = ["uv_index", "uvi", "value", "messwert", "uv", "UV_Index", "UV"]
-_TIME_PROP_CANDIDATES = [
-    "end_measure",
-    "time",
-    "zeitstempel",
-    "datetime",
-    "timestamp",
-    "datum",
-    "date",
-    "start_measure",
-]
-_STATION_PROP_CANDIDATES = ["station_id", "station", "kenn", "standort_id", "id"]
+BFS_URL = "https://www.bfs.de/DE/themen/opt/uv/uv-index/aktuelle-tagesverlaeufe/_documents/schauinsland_node.html"
+BFS_SCHAUINSLAND_URL = BFS_URL
 
 
 def fetch_bfs_schauinsland(timeout: float = 15.0) -> SourceFetch:
@@ -75,13 +68,12 @@ def fetch_bfs_schauinsland(timeout: float = 15.0) -> SourceFetch:
 
 
 def fetch_bfs_freiburg(timeout: float = 15.0) -> SourceFetch:
-    # No Freiburg station in the BFS network — use nearest station to Basel
     meta = _discover_nearest_station(timeout=timeout)
-    return _fetch_station(meta, fallback_name="BFS Schauinsland", timeout=timeout)
+    return _fetch_station(meta, fallback_name="BFS nearest", timeout=timeout)
 
 
 def fetch_bfs_best(timeout: float = 15.0) -> SourceFetch:
-    """Fetch UV from the nearest BFS station to Basel (Schauinsland)."""
+    """Fetch today's UV from the nearest BFS station to Basel (Schauinsland)."""
     meta = _discover_station(name_hint="Schauinsland", timeout=timeout)
     if meta is None:
         meta = _discover_nearest_station(timeout=timeout)
@@ -89,7 +81,6 @@ def fetch_bfs_best(timeout: float = 15.0) -> SourceFetch:
 
 
 def _fetch_station(meta: dict | None, fallback_name: str, timeout: float) -> SourceFetch:
-    """Fetch UV for a station described by WFS metadata dict."""
     if meta:
         station_id = meta["station_id"]
         station_name = meta.get("station_name", fallback_name)
@@ -97,29 +88,169 @@ def _fetch_station(meta: dict | None, fallback_name: str, timeout: float) -> Sou
         display_name = f"BFS {station_name}"
     else:
         station_id = _DEFAULT_STATION_ID
+        station_name = _DEFAULT_STATION_NAME
         alt_m = _DEFAULT_STATION_ALT_M
         display_name = fallback_name
 
-    result = _fetch_bfs_wfs(station_id, display_name, alt_m, timeout)
+    # Try PNG chart first (gives ~30-min resolution for today)
+    result = _fetch_png(station_name, display_name, alt_m, timeout)
     if result.ok:
         return result
 
-    # HTML fallback (Schauinsland only)
-    html = _fetch_bfs_html_station(BFS_SCHAUINSLAND_URL, display_name, alt_m, timeout)
-    if html.ok:
-        return html
+    # Fallback: WFS daily peak (single integer for today)
+    fallback = _fetch_daily_peak_wfs(station_id, display_name, alt_m, timeout)
+    if fallback.ok:
+        return fallback
 
     return SourceFetch(
         name=display_name,
         ok=False,
-        error=f"WFS: {result.error}; HTML: {html.error}",
-        latency_ms=result.latency_ms + html.latency_ms,
+        error=f"PNG: {result.error}; WFS: {fallback.error}",
+        latency_ms=result.latency_ms + fallback.latency_ms,
         station_alt_m=alt_m,
     )
 
 
-def _discover_station(name_hint: str, timeout: float) -> dict | None:
-    """Query uv_index_tagesverlauf and return properties for station matching name_hint."""
+# ── PNG chart parser ────────────────────────────────────────────────────────
+
+
+def _fetch_png(station_name: str, display_name: str, alt_m: float, timeout: float) -> SourceFetch:
+    """Fetch and parse the daily chart PNG for a BFS station."""
+    url = f"{PNG_BASE_URL}/EEr_{station_name}_today.png"
+    t0 = time.monotonic()
+    try:
+        resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+        latency_ms = (time.monotonic() - t0) * 1000
+        resp.raise_for_status()
+
+        points = _parse_png(resp.content)
+        if not points:
+            return SourceFetch(
+                name=display_name,
+                ok=False,
+                error="PNG: no UV readings extracted",
+                latency_ms=latency_ms,
+                station_alt_m=alt_m,
+            )
+
+        logger.debug("BFS PNG %s: %d hourly points, peak=%.1f", station_name, len(points), max(p.uv_index for p in points))
+        return SourceFetch(
+            name=display_name,
+            ok=True,
+            hourly=points,
+            latency_ms=latency_ms,
+            station_alt_m=alt_m,
+        )
+    except httpx.TimeoutException:
+        return SourceFetch(
+            name=display_name,
+            ok=False,
+            error="PNG timeout",
+            latency_ms=(time.monotonic() - t0) * 1000,
+            station_alt_m=alt_m,
+        )
+    except Exception as e:
+        logger.warning("BFS PNG fetch failed for %s: %s", station_name, e)
+        return SourceFetch(
+            name=display_name,
+            ok=False,
+            error=f"PNG: {e}",
+            latency_ms=(time.monotonic() - t0) * 1000,
+            station_alt_m=alt_m,
+        )
+
+
+def _parse_png(png_bytes: bytes) -> list[HourlyPoint]:
+    """Extract hourly UV readings from a BFS chart PNG.
+
+    Scans each half-hour column bottom-up to find the bar top, converts the
+    y-pixel to a UV value, then averages the two half-hour slots per hour.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow not installed; PNG parsing unavailable")
+        return []
+
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
+    px = img.load()
+    img_w, img_h = img.size
+
+    # Bail out if the chart template has changed significantly
+    if img_w != 640 or img_h != 480:
+        logger.warning("BFS PNG size changed: %dx%d (expected 640x480)", img_w, img_h)
+        return []
+
+    def _is_bar(r: int, g: int, b: int) -> bool:
+        if r > 245 and g > 245 and b > 245:
+            return False  # white background
+        if abs(r - g) < 12 and abs(g - b) < 12:
+            return False  # gray (gridlines, clear-sky curve)
+        if r < 20 and g < 20 and b < 20:
+            return False  # black (axis lines)
+        if b > r + 20 and b > g + 20:
+            return False  # blue (timestamp indicator top-right)
+        return True
+
+    # Find the rightmost x where bar data exists (where today's data ends)
+    x_data_end = _PNG_X_START
+    for x in range(_PNG_X_START, _PNG_X_END):
+        c = px[x, _PNG_Y_BOTTOM - 2]
+        if _is_bar(c[0], c[1], c[2]):
+            x_data_end = x
+
+    # Half-hour readings
+    half_hour_values: dict[tuple[int, int], float] = {}
+    for hour in range(6, 21):
+        for half in range(2):
+            t_frac = (hour - 6) + half * 0.5
+            x = int(_PNG_X_START + (t_frac + 0.25) * _PNG_PX_PER_HOUR)
+            if x > x_data_end or x >= img_w:
+                continue
+
+            bar_top_y: int | None = None
+            for y in range(_PNG_Y_BOTTOM - 1, _PNG_Y_TOP - 1, -1):
+                c = px[x, y]
+                if _is_bar(c[0], c[1], c[2]):
+                    bar_top_y = y
+                elif bar_top_y is not None:
+                    break
+
+            if bar_top_y is not None:
+                uv = max(0.0, (_PNG_Y_BOTTOM - bar_top_y) / (_PNG_Y_BOTTOM - _PNG_Y_TOP) * _PNG_UV_MAX)
+                half_hour_values[(hour, half)] = round(uv, 2)
+
+    if not half_hour_values:
+        return []
+
+    # Average two half-hour slots per hour
+    hourly: dict[int, list[float]] = {}
+    for (hour, _half), uv in half_hour_values.items():
+        hourly.setdefault(hour, []).append(uv)
+
+    return sorted(
+        [
+            HourlyPoint(
+                hour=h,
+                uv_index=sum(vals) / len(vals),
+                uv_index_clear_sky=sum(vals) / len(vals),
+                cloud_cover_pct=0.0,
+            )
+            for h, vals in hourly.items()
+            if sum(vals) / len(vals) > 0
+        ],
+        key=lambda p: p.hour,
+    )
+
+
+# ── WFS daily-peak fallback ─────────────────────────────────────────────────
+
+
+def _fetch_daily_peak_wfs(
+    station_id: str, display_name: str, alt_m: float, timeout: float
+) -> SourceFetch:
+    """Fetch today's peak UV (integer) from the WFS uv_index_timeseries layer."""
+    t0 = time.monotonic()
     try:
         resp = httpx.get(
             WFS_BASE_URL,
@@ -127,7 +258,82 @@ def _discover_station(name_hint: str, timeout: float) -> dict | None:
                 "service": "WFS",
                 "version": "1.1.0",
                 "request": "GetFeature",
-                "typeName": WFS_STATION_LAYER,
+                "typeName": WFS_TIMESERIES_LAYER,
+                "outputFormat": "application/json",
+                "viewparams": f"station_id:{station_id}",
+                "sortBy": "date D",
+                "maxFeatures": "3",
+            },
+            timeout=timeout,
+            follow_redirects=True,
+        )
+        latency_ms = (time.monotonic() - t0) * 1000
+        resp.raise_for_status()
+
+        today_utc = dt.datetime.now(tz=dt.UTC).date()
+        for feat in resp.json().get("features", []):
+            props = feat.get("properties", {})
+            try:
+                record_date = dt.datetime.fromisoformat(
+                    props.get("date", "").replace("Z", "+00:00")
+                ).date()
+            except (ValueError, AttributeError):
+                continue
+            raw_uv = props.get("uv_index")
+            if raw_uv is None:
+                continue
+            uv_val = float(raw_uv)
+            if not (0.0 <= uv_val <= 25.0):
+                continue
+            if record_date in (today_utc, today_utc - dt.timedelta(days=1)):
+                logger.debug("BFS WFS %s: peak_uv=%.0f date=%s", station_id, uv_val, record_date)
+                return SourceFetch(
+                    name=display_name,
+                    ok=True,
+                    hourly=[HourlyPoint(hour=13, uv_index=uv_val, uv_index_clear_sky=uv_val, cloud_cover_pct=0.0)],
+                    latency_ms=latency_ms,
+                    station_alt_m=alt_m,
+                )
+
+        return SourceFetch(
+            name=display_name,
+            ok=False,
+            error="no valid UV reading in WFS response",
+            latency_ms=latency_ms,
+            station_alt_m=alt_m,
+        )
+    except httpx.TimeoutException:
+        return SourceFetch(
+            name=display_name,
+            ok=False,
+            error="WFS timeout",
+            latency_ms=(time.monotonic() - t0) * 1000,
+            station_alt_m=alt_m,
+        )
+    except Exception as e:
+        logger.exception("BFS WFS fetch failed for %s", station_id)
+        return SourceFetch(
+            name=display_name,
+            ok=False,
+            error=str(e),
+            latency_ms=(time.monotonic() - t0) * 1000,
+            station_alt_m=alt_m,
+        )
+
+
+# ── Station discovery ────────────────────────────────────────────────────────
+
+
+def _discover_station(name_hint: str, timeout: float) -> dict | None:
+    """Return WFS metadata for the station matching name_hint."""
+    try:
+        resp = httpx.get(
+            WFS_BASE_URL,
+            params={
+                "service": "WFS",
+                "version": "1.1.0",
+                "request": "GetFeature",
+                "typeName": WFS_STATIONS_LAYER,
                 "outputFormat": "application/json",
                 "maxFeatures": "100",
             },
@@ -135,25 +341,24 @@ def _discover_station(name_hint: str, timeout: float) -> dict | None:
             follow_redirects=True,
         )
         resp.raise_for_status()
-        features = resp.json().get("features", [])
         hint_lower = name_hint.lower()
-        for feat in features:
+        for feat in resp.json().get("features", []):
             props = feat.get("properties", {})
             if hint_lower in props.get("station_name", "").lower():
                 logger.debug(
-                    "Discovered station: %s id=%s alt=%sm",
+                    "Discovered BFS station: %s id=%s alt=%sm",
                     props.get("station_name"),
                     props.get("station_id"),
                     props.get("hoehe"),
                 )
                 return props
     except Exception as e:
-        logger.warning("Station discovery failed: %s", e)
+        logger.warning("BFS station discovery failed: %s", e)
     return None
 
 
 def _discover_nearest_station(timeout: float) -> dict | None:
-    """Return the WFS station metadata for the station nearest to Basel."""
+    """Return WFS metadata for the BFS station nearest to Basel."""
     try:
         resp = httpx.get(
             WFS_BASE_URL,
@@ -161,7 +366,7 @@ def _discover_nearest_station(timeout: float) -> dict | None:
                 "service": "WFS",
                 "version": "1.1.0",
                 "request": "GetFeature",
-                "typeName": WFS_STATION_LAYER,
+                "typeName": WFS_STATIONS_LAYER,
                 "outputFormat": "application/json",
                 "maxFeatures": "100",
             },
@@ -181,373 +386,5 @@ def _discover_nearest_station(timeout: float) -> dict | None:
         )
         return nearest["properties"]
     except Exception as e:
-        logger.warning("Nearest-station discovery failed: %s", e)
+        logger.warning("BFS nearest-station discovery failed: %s", e)
     return None
-
-
-def _fetch_bfs_wfs(station_id: str, name: str, station_alt_m: float, timeout: float) -> SourceFetch:
-    """Fetch UV readings from opendata:abi_30min for the given station_id.
-
-    Tries two variants:
-      1. CQL_FILTER=station_id='{station_id}' (server-side)
-      2. No filter, maxFeatures=200, filter client-side
-         (fallback if the server rejects the CQL property name)
-    """
-    t0 = time.monotonic()
-    attempts = [
-        {
-            "service": "WFS",
-            "version": "1.1.0",
-            "request": "GetFeature",
-            "typeName": WFS_UV_LAYER,
-            "outputFormat": "application/json",
-            "CQL_FILTER": f"station_id='{station_id}'",
-            "maxFeatures": "60",
-        },
-        {
-            "service": "WFS",
-            "version": "1.1.0",
-            "request": "GetFeature",
-            "typeName": WFS_UV_LAYER,
-            "outputFormat": "application/json",
-            "maxFeatures": "200",
-        },
-    ]
-
-    last_error = "no attempts made"
-    for attempt_idx, params in enumerate(attempts):
-        try:
-            resp = httpx.get(WFS_BASE_URL, params=params, timeout=timeout, follow_redirects=True)
-            latency_ms = (time.monotonic() - t0) * 1000
-
-            if not resp.is_success:
-                logger.warning(
-                    "WFS HTTP %d for %s (attempt %d): %r",
-                    resp.status_code,
-                    station_id,
-                    attempt_idx,
-                    resp.text[:300],
-                )
-                last_error = f"HTTP {resp.status_code}"
-                continue
-
-            body = resp.text.strip()
-            if not body:
-                last_error = "empty response"
-                continue
-
-            try:
-                data = resp.json()
-            except Exception as json_err:
-                logger.warning(
-                    "WFS non-JSON for %s (attempt %d): %s | body[:400]=%r",
-                    station_id,
-                    attempt_idx,
-                    json_err,
-                    body[:400],
-                )
-                last_error = f"non-JSON: {body[:120]!r}"
-                continue
-
-            features = data.get("features", [])
-
-            if not features:
-                # No data — likely nighttime (correct behavior), not an error worth retrying
-                last_error = "no UV readings (nighttime or station offline)"
-                logger.debug("WFS %s attempt %d: 0 features (nighttime?)", station_id, attempt_idx)
-                break  # Don't bother with second attempt — it'll also be empty
-
-            # On no-filter attempt, narrow client-side
-            if attempt_idx == 1:
-                all_features = features
-                features = _filter_features_by_station(features, station_id)
-                if not features:
-                    all_ids = _collect_station_ids(all_features)
-                    logger.warning(
-                        "WFS no features for %s; station IDs present: %s", station_id, all_ids[:20]
-                    )
-                    last_error = f"no match for {station_id!r}; seen: {all_ids[:5]}"
-                    continue
-
-            sample_props = features[0].get("properties", {})
-            logger.debug(
-                "WFS %s properties: %s | sample: %s",
-                station_id,
-                list(sample_props.keys()),
-                {k: v for k, v in list(sample_props.items())[:6]},
-            )
-
-            points = _parse_wfs_features(features)
-            if not points:
-                last_error = f"could not parse UV from props {list(sample_props.keys())}"
-                logger.warning("WFS %s: %s", station_id, last_error)
-                continue
-
-            return SourceFetch(
-                name=name,
-                ok=True,
-                hourly=points,
-                latency_ms=latency_ms,
-                station_alt_m=station_alt_m,
-            )
-
-        except httpx.TimeoutException:
-            return SourceFetch(
-                name=name,
-                ok=False,
-                error="WFS timeout",
-                latency_ms=(time.monotonic() - t0) * 1000,
-                station_alt_m=station_alt_m,
-            )
-        except Exception as e:
-            logger.exception("WFS fetch failed for %s (attempt %d)", station_id, attempt_idx)
-            last_error = f"exception: {e}"
-            continue
-
-    return SourceFetch(
-        name=name,
-        ok=False,
-        error=last_error,
-        latency_ms=(time.monotonic() - t0) * 1000,
-        station_alt_m=station_alt_m,
-    )
-
-
-def _parse_wfs_features(features: list[dict]) -> list[HourlyPoint]:
-    """Parse abi_30min GeoJSON features into hourly UV points (mean per hour)."""
-    local_offset = 2 if _is_summer() else 1
-
-    if not features:
-        return []
-
-    sample = features[0].get("properties", {})
-    uv_prop = _detect_prop(sample, _UV_PROP_CANDIDATES)
-    time_prop = _detect_prop(sample, _TIME_PROP_CANDIDATES)
-
-    if uv_prop is None:
-        logger.warning("Cannot find UV property in WFS response. Keys: %s", list(sample.keys()))
-        return []
-
-    logger.debug("WFS parsing: uv_prop=%s time_prop=%s", uv_prop, time_prop)
-
-    hourly_readings: dict[int, list[float]] = {}
-    for feat in features:
-        props = feat.get("properties", {})
-        raw_uv = props.get(uv_prop)
-        if raw_uv is None:
-            continue
-        try:
-            uv_val = float(raw_uv)
-        except (TypeError, ValueError):
-            continue
-        if not (0.0 <= uv_val <= 25.0):
-            continue
-
-        local_hour: int | None = None
-        if time_prop:
-            local_hour = _parse_hour(props.get(time_prop), local_offset)
-        if local_hour is None:
-            for _k, v in props.items():
-                if isinstance(v, str) and ("T" in v or ":" in v):
-                    local_hour = _parse_hour(v, local_offset)
-                    if local_hour is not None:
-                        break
-        if local_hour is None:
-            continue
-
-        hourly_readings.setdefault(local_hour, []).append(uv_val)
-
-    if not hourly_readings:
-        return []
-
-    return sorted(
-        [
-            HourlyPoint(
-                hour=h,
-                uv_index=sum(vals) / len(vals),
-                uv_index_clear_sky=sum(vals) / len(vals),
-                cloud_cover_pct=0.0,
-            )
-            for h, vals in hourly_readings.items()
-        ],
-        key=lambda p: p.hour,
-    )
-
-
-def _detect_prop(props: dict, candidates: list[str]) -> str | None:
-    keys_lower = {k.lower(): k for k in props}
-    for c in candidates:
-        if c in props:
-            return c
-        if c.lower() in keys_lower:
-            return keys_lower[c.lower()]
-    return None
-
-
-def _parse_hour(raw: object, local_offset: int) -> int | None:
-    if raw is None:
-        return None
-    if isinstance(raw, (int, float)):
-        try:
-            ts = dt.datetime.fromtimestamp(float(raw) / 1000, tz=dt.UTC)
-            return (ts.hour + local_offset) % 24
-        except Exception:
-            return None
-    if isinstance(raw, str):
-        for fmt in (
-            "%Y-%m-%dT%H:%M:%S%z",
-            "%Y-%m-%dT%H:%M:%SZ",
-            "%Y-%m-%d %H:%M:%S",
-            "%Y-%m-%dT%H:%M:%S",
-        ):
-            try:
-                ts = dt.datetime.strptime(raw[:19], fmt[: len(fmt)])
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=dt.UTC)
-                return (ts.hour + local_offset) % 24
-            except ValueError:
-                continue
-        if raw.isdigit() and len(raw) >= 10:
-            try:
-                ts = dt.datetime.fromtimestamp(int(raw) / 1000, tz=dt.UTC)
-                return (ts.hour + local_offset) % 24
-            except Exception:
-                pass
-    return None
-
-
-def _filter_features_by_station(features: list[dict], station_id: str) -> list[dict]:
-    sid_lower = station_id.lower()
-    for prop in _STATION_PROP_CANDIDATES:
-        matched = [
-            f for f in features if str(f.get("properties", {}).get(prop, "")).lower() == sid_lower
-        ]
-        if matched:
-            return matched
-    for prop in _STATION_PROP_CANDIDATES:
-        matched = [
-            f for f in features if sid_lower in str(f.get("properties", {}).get(prop, "")).lower()
-        ]
-        if matched:
-            return matched
-    return []
-
-
-def _collect_station_ids(features: list[dict]) -> list[str]:
-    seen: set[str] = set()
-    for feat in features:
-        props = feat.get("properties", {})
-        for prop in _STATION_PROP_CANDIDATES:
-            val = props.get(prop)
-            if val is not None:
-                seen.add(str(val))
-    return sorted(seen)
-
-
-# ── HTML scraping fallback ──────────────────────────────────────────────────
-
-
-def _fetch_bfs_html_station(
-    url: str, name: str, station_alt_m: float, timeout: float
-) -> SourceFetch:
-    t0 = time.monotonic()
-    try:
-        resp = httpx.get(url, timeout=timeout, follow_redirects=True)
-        latency_ms = (time.monotonic() - t0) * 1000
-        resp.raise_for_status()
-        points = _parse_bfs_html(resp.text)
-        if not points:
-            return SourceFetch(
-                name=name,
-                ok=False,
-                error="Could not parse UV data from BFS page",
-                latency_ms=latency_ms,
-                station_alt_m=station_alt_m,
-            )
-        return SourceFetch(
-            name=name, ok=True, hourly=points, latency_ms=latency_ms, station_alt_m=station_alt_m
-        )
-    except httpx.TimeoutException:
-        latency_ms = (time.monotonic() - t0) * 1000
-        return SourceFetch(
-            name=name,
-            ok=False,
-            error="HTML timeout",
-            latency_ms=latency_ms,
-            station_alt_m=station_alt_m,
-        )
-    except Exception as e:
-        latency_ms = (time.monotonic() - t0) * 1000
-        return SourceFetch(
-            name=name,
-            ok=False,
-            error=f"HTML error: {e}",
-            latency_ms=latency_ms,
-            station_alt_m=station_alt_m,
-        )
-
-
-def _parse_bfs_html(html: str) -> list[HourlyPoint]:
-    soup = BeautifulSoup(html, "lxml")
-    points = _try_parse_highcharts(soup)
-    if points:
-        return points
-    return _try_parse_table(soup)
-
-
-def _try_parse_highcharts(soup: BeautifulSoup) -> list[HourlyPoint]:
-    local_offset = 2 if _is_summer() else 1
-    for script in soup.find_all("script"):
-        text = script.string or ""
-        pairs = re.findall(r"\[(\d{10,13})\s*,\s*([\d.]+)\]", text)
-        if len(pairs) < 3:
-            continue
-        points: list[HourlyPoint] = []
-        for ts_str, uv_str in pairs:
-            ts = dt.datetime.fromtimestamp(int(ts_str) / 1000, tz=dt.UTC)
-            local_hour = (ts.hour + local_offset) % 24
-            uv_val = float(uv_str)
-            if 0.0 <= uv_val <= 20.0:
-                points.append(
-                    HourlyPoint(
-                        hour=local_hour,
-                        uv_index=uv_val,
-                        uv_index_clear_sky=uv_val,
-                        cloud_cover_pct=0.0,
-                    )
-                )
-        if points:
-            return sorted(points, key=lambda p: p.hour)
-    return []
-
-
-def _try_parse_table(soup: BeautifulSoup) -> list[HourlyPoint]:
-    for table in soup.find_all("table"):
-        points: list[HourlyPoint] = []
-        for row in table.find_all("tr"):
-            cells = row.find_all(["td", "th"])
-            if len(cells) < 2:
-                continue
-            hour_match = re.match(r"^(\d{1,2})(?::\d{2})?$", cells[0].get_text(strip=True))
-            if hour_match:
-                try:
-                    hour = int(hour_match.group(1))
-                    uv_val = float(cells[1].get_text(strip=True).replace(",", "."))
-                    if 0 <= hour <= 23 and 0.0 <= uv_val <= 20.0:
-                        points.append(
-                            HourlyPoint(
-                                hour=hour,
-                                uv_index=uv_val,
-                                uv_index_clear_sky=uv_val,
-                                cloud_cover_pct=0.0,
-                            )
-                        )
-                except ValueError:
-                    continue
-        if len(points) >= 4:
-            return sorted(points, key=lambda p: p.hour)
-    return []
-
-
-def _is_summer() -> bool:
-    return 3 < dt.datetime.now(tz=dt.UTC).month < 11
