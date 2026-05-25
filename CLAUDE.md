@@ -32,7 +32,7 @@ Four parallel GitHub Actions jobs in `.github/workflows/ci.yml`: `lint`, `format
 ```
 uvrad/                  # core UV pipeline package
   sources/
-    open_meteo.py       # Open-Meteo REST API (ICON seamless + CAMS Europe)
+    open_meteo.py       # Open-Meteo REST API (best_match + GFS seamless)
     bfs.py              # BFS Schauinsland HTML scraper (calibration only)
   altitude.py           # WHO 10%/1000m altitude correction
   solar.py              # pvlib solar zenith + cosine-weighted interpolation
@@ -52,12 +52,15 @@ tests/
 
 | Source | Role | Auth |
 |--------|------|------|
-| Open-Meteo ICON seamless (MeteoSwiss) | Primary — 50% weight | None |
-| Open-Meteo CAMS Europe (Copernicus) | Secondary — 50% weight | None |
+| Open-Meteo best_match (ICON-EU for Basel) | Primary — 50% weight | None |
+| Open-Meteo GFS Seamless (NCEP GFS + HRRR) | Secondary — 50% weight | None |
 | BFS Schauinsland (~60km SSW of Basel, 1284m) | Calibration offset only | None (scrape) |
 
 Open-Meteo returns `uv_index` (cloud-corrected by the model) and `uv_index_clear_sky`.
 Both are stored and displayed. Source weights renormalize automatically if a source fails.
+
+Note: ECMWF IFS (`ecmwf_ifs025`) and ICON seamless do not expose `uv_index` via
+Open-Meteo (return null). MeteoSwiss ICON-CH2 has no dedicated Open-Meteo endpoint.
 
 BFS Schauinsland is used only for a calibration offset (signed difference between
 altitude-corrected ground measurement and model output). It is never averaged into
@@ -74,7 +77,7 @@ solar geometry. Interpolates between hourly forecast values using cosine(zenith)
 rather than clock fraction — physically correct because UV ∝ 1/air_mass ≈ cos(zenith).
 Returns 0 when sun is below horizon (zenith ≥ 90°).
 
-**Fusion** (`uvrad/fusion.py`): weighted average of ICON and CAMS for each hourly slot,
+**Fusion** (`uvrad/fusion.py`): weighted average of ICON-EU and GFS for each hourly slot,
 then altitude correction applied to the fused series. BFS offset computed separately.
 
 ## Primary location

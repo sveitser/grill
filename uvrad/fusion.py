@@ -1,7 +1,7 @@
 """Multi-source UV data fusion.
 
-Fuses ICON and CAMS model forecasts with a weighted average, applies
-altitude correction, then computes a BFS calibration offset.
+Fuses ICON-EU (best_match) and GFS seamless forecasts with a weighted average,
+applies altitude correction, then computes a BFS calibration offset.
 
 Why BFS is calibration-only (not averaged in):
   Schauinsland is 60km away at 1284m. Its absolute UV values reflect a
@@ -19,8 +19,7 @@ from uvrad.sources.bfs import SCHAUINSLAND_ALT_M
 # Relative weights for model sources (renormalized if a source fails)
 SOURCE_WEIGHTS: dict[str, float] = {
     "Open-Meteo Global": 0.50,
-    "Open-Meteo ECMWF": 0.50,
-    "MeteoSwiss ICON-CH2": 0.50,
+    "Open-Meteo GFS": 0.50,
 }
 
 
