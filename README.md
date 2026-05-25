@@ -69,8 +69,8 @@ Example output:
 
 | Source | Role |
 |--------|------|
-| [Open-Meteo](https://open-meteo.com) ICON seamless (MeteoSwiss model) | Primary — 50% weight |
-| [Open-Meteo](https://open-meteo.com) CAMS Europe (Copernicus) | Secondary — 50% weight |
+| [Open-Meteo](https://open-meteo.com) Global best_match (ECMWF/GFS blend) | Primary — 50% weight |
+| [Open-Meteo](https://open-meteo.com) ECMWF IFS 0.25° | Secondary — 50% weight |
 | [BFS Schauinsland](https://www.bfs.de/DE/themen/opt/uv/uv-index/aktuelle-tagesverlaeufe/_documents/schauinsland_node.html) ground station | Calibration offset only |
 
 Both Open-Meteo sources are free and require no API key. They return `uv_index` (already corrected for cloud cover by the atmospheric model) and `uv_index_clear_sky`.
