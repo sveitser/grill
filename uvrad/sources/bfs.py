@@ -26,6 +26,7 @@ import io
 import logging
 import math
 import time
+from typing import cast
 
 import httpx
 
@@ -46,10 +47,10 @@ _DEFAULT_STATION_NAME = "Schauinsland"
 _DEFAULT_STATION_ALT_M = 1206.0
 
 # PNG chart pixel calibration (derived from live 640×480 chart)
-_PNG_X_START = 105    # x-pixel at hour 6:00
-_PNG_X_END = 578      # x-pixel at hour 21:00 (right axis)
-_PNG_Y_BOTTOM = 427   # y-pixel = UV 0 (baseline)
-_PNG_Y_TOP = 68       # y-pixel = UV 9 (top gridline)
+_PNG_X_START = 105  # x-pixel at hour 6:00
+_PNG_X_END = 578  # x-pixel at hour 21:00 (right axis)
+_PNG_Y_BOTTOM = 427  # y-pixel = UV 0 (baseline)
+_PNG_Y_TOP = 68  # y-pixel = UV 9 (top gridline)
 _PNG_UV_MAX = 9.0
 _PNG_PX_PER_HOUR = (_PNG_X_END - _PNG_X_START) / 15.0  # 15 hours (6–21)
 
@@ -133,7 +134,12 @@ def _fetch_png(station_name: str, display_name: str, alt_m: float, timeout: floa
                 station_alt_m=alt_m,
             )
 
-        logger.debug("BFS PNG %s: %d hourly points, peak=%.1f", station_name, len(points), max(p.uv_index for p in points))
+        logger.debug(
+            "BFS PNG %s: %d hourly points, peak=%.1f",
+            station_name,
+            len(points),
+            max(p.uv_index for p in points),
+        )
         return SourceFetch(
             name=display_name,
             ok=True,
@@ -174,6 +180,8 @@ def _parse_png(png_bytes: bytes) -> list[HourlyPoint]:
 
     img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
     px = img.load()
+    if px is None:
+        return []
     img_w, img_h = img.size
 
     # Bail out if the chart template has changed significantly
@@ -188,15 +196,13 @@ def _parse_png(png_bytes: bytes) -> list[HourlyPoint]:
             return False  # gray (gridlines, clear-sky curve)
         if r < 20 and g < 20 and b < 20:
             return False  # black (axis lines)
-        if b > r + 20 and b > g + 20:
-            return False  # blue (timestamp indicator top-right)
-        return True
+        return not (b > r + 20 and b > g + 20)  # blue (timestamp indicator top-right)
 
     # Find the rightmost x where bar data exists (where today's data ends)
     x_data_end = _PNG_X_START
     for x in range(_PNG_X_START, _PNG_X_END):
-        c = px[x, _PNG_Y_BOTTOM - 2]
-        if _is_bar(c[0], c[1], c[2]):
+        r_px, g_px, b_px, *_ = cast(tuple[int, ...], img.getpixel((x, _PNG_Y_BOTTOM - 2)))
+        if _is_bar(r_px, g_px, b_px):
             x_data_end = x
 
     # Half-hour readings
@@ -210,14 +216,16 @@ def _parse_png(png_bytes: bytes) -> list[HourlyPoint]:
 
             bar_top_y: int | None = None
             for y in range(_PNG_Y_BOTTOM - 1, _PNG_Y_TOP - 1, -1):
-                c = px[x, y]
-                if _is_bar(c[0], c[1], c[2]):
+                r_px, g_px, b_px, *_ = cast(tuple[int, ...], img.getpixel((x, y)))
+                if _is_bar(r_px, g_px, b_px):
                     bar_top_y = y
                 elif bar_top_y is not None:
                     break
 
             if bar_top_y is not None:
-                uv = max(0.0, (_PNG_Y_BOTTOM - bar_top_y) / (_PNG_Y_BOTTOM - _PNG_Y_TOP) * _PNG_UV_MAX)
+                uv = max(
+                    0.0, (_PNG_Y_BOTTOM - bar_top_y) / (_PNG_Y_BOTTOM - _PNG_Y_TOP) * _PNG_UV_MAX
+                )
                 half_hour_values[(hour, half)] = round(uv, 2)
 
     if not half_hour_values:
@@ -290,7 +298,11 @@ def _fetch_daily_peak_wfs(
                 return SourceFetch(
                     name=display_name,
                     ok=True,
-                    hourly=[HourlyPoint(hour=13, uv_index=uv_val, uv_index_clear_sky=uv_val, cloud_cover_pct=0.0)],
+                    hourly=[
+                        HourlyPoint(
+                            hour=13, uv_index=uv_val, uv_index_clear_sky=uv_val, cloud_cover_pct=0.0
+                        )
+                    ],
                     latency_ms=latency_ms,
                     station_alt_m=alt_m,
                 )

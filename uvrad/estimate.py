@@ -19,8 +19,8 @@ from uvrad.models import (
     Location,
     SourceContribution,
     SourceFetch,
-    UVEstimate,
     UVDataUnavailableError,
+    UVEstimate,
 )
 from uvrad.solar import (
     interpolate_current_uv,
@@ -89,7 +89,9 @@ def get_uv_estimate(
         try:
             tomorrow_fused = fuse(loc, icon_tmr, gfs_tmr, bfs_fetch=None)
             tomorrow_date = day + timedelta(days=1)
-            tomorrow_zeniths = solar_zenith_series(loc.lat, loc.lon, tomorrow_date, tz="Europe/Zurich")
+            tomorrow_zeniths = solar_zenith_series(
+                loc.lat, loc.lon, tomorrow_date, tz="Europe/Zurich"
+            )
             for point, z in zip(tomorrow_fused.hourly, tomorrow_zeniths, strict=False):
                 point.solar_zenith_deg = z
             tomorrow_hourly = tomorrow_fused.hourly
