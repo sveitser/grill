@@ -15,5 +15,5 @@ COPY api/ api/
 
 ENV PYTHONUNBUFFERED=1
 
-EXPOSE 8080
-CMD ["uv", "run", "--no-sync", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8080"]
+EXPOSE 7860
+CMD ["uv", "run", "--no-sync", "uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "7860"]

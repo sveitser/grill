@@ -1,3 +1,12 @@
+---
+title: UV Radiation Index
+emoji: ☀️
+colorFrom: yellow
+colorTo: orange
+sdk: docker
+pinned: false
+---
+
 # grill
 
 UV radiation index for Basel, Switzerland — and anywhere else.
