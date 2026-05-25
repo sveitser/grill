@@ -60,5 +60,5 @@ jobs:
           fetch-depth: 0
       - name: Push to Hugging Face Spaces
         run: |
-          git remote add hf https://sveitser:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/sveitser/grill
+          git remote add hf https://ulen77:${{ secrets.HF_TOKEN }}@huggingface.co/spaces/ulen77/uvrad
           git push hf HEAD:main --force
