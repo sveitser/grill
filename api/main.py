@@ -60,7 +60,7 @@ def _serialize_computation(est: UVEstimate) -> dict | None:
             "station_alt_m": c.bfs.station_alt_m,
             "hours_matched": c.bfs.hours_matched,
             "offset": c.bfs.offset,
-            "note": "offset is informational — not applied to the estimate",
+            "note": "model-only vs ground measurement; BFS is also included in fusion with cloud-scaled weight",
         }
     else:
         result["bfs_calibration"] = None

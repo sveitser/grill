@@ -382,12 +382,15 @@ function renderComputation(c) {
 
   // Fusion sources
   html += '<div class="section-title">Fusion (weighted average)</div>';
-  html += '<table><tr><th>Source</th><th>Weight</th><th>UV (cloud-corr)</th><th>Clear-sky UV</th></tr>';
+  html += '<table><tr><th>Source</th><th>Weight</th><th>UV (alt-corr)</th><th>Clear-sky UV</th></tr>';
   for (const s of c.fusion.sources) {
     const pct = (s.weight * 100).toFixed(0);
+    const isBfs = s.name.startsWith('BFS');
+    const tag = isBfs ? ' <span style="color:#2e7d32;font-size:0.68rem;font-weight:600">● live measurement</span>' : '';
+    const weightNote = isBfs ? ' <span style="color:#aaa">(cloud-scaled)</span>' : '';
     html += `<tr>
-      <td>${s.name}</td>
-      <td class="mono">${pct}%</td>
+      <td>${s.name}${tag}</td>
+      <td class="mono">${pct}%${weightNote}</td>
       <td class="mono">${s.uv_index.toFixed(2)}</td>
       <td class="mono">${s.uv_index_clear_sky.toFixed(2)}</td>
     </tr>`;
@@ -419,18 +422,21 @@ function renderComputation(c) {
   }
 
   // BFS calibration
-  html += '<div class="section-title">BFS calibration offset</div>';
+  html += '<div class="section-title">BFS model-vs-ground bias</div>';
   if (c.bfs_calibration) {
     const bfs = c.bfs_calibration;
     const sign = bfs.offset >= 0 ? '+' : '';
+    const biasText = bfs.offset >= 0
+      ? `models underestimate by ${bfs.offset.toFixed(2)} on average`
+      : `models overestimate by ${Math.abs(bfs.offset).toFixed(2)} on average`;
     html += `<table>
-      <tr><th>Station</th><td>${bfs.station} (${bfs.station_alt_m} m)</td></tr>
+      <tr><th>Station</th><td>${bfs.station} (${bfs.station_alt_m} m asl)</td></tr>
       <tr><th>Hours matched</th><td class="mono">${bfs.hours_matched}</td></tr>
-      <tr><th>Offset</th><td class="mono">${sign}${bfs.offset.toFixed(3)}</td></tr>
+      <tr><th>Bias</th><td class="mono">${sign}${bfs.offset.toFixed(3)} — ${biasText}</td></tr>
       <tr><th>Note</th><td style="color:#aaa">${bfs.note}</td></tr>
     </table>`;
   } else {
-    html += '<span style="color:#aaa">BFS data unavailable</span>';
+    html += '<span style="color:#aaa">BFS data unavailable — forecast-only</span>';
   }
 
   el.innerHTML = html;

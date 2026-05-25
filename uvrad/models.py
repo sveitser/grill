@@ -69,6 +69,9 @@ class SourceFetch:
     hourly: list[HourlyPoint] = field(default_factory=list)
     error: str | None = None
     latency_ms: float = 0.0
+    station_alt_m: float | None = (
+        None  # None = model output (sea-level equivalent); float = measured at this altitude
+    )
 
 
 @dataclass

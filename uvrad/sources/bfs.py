@@ -37,14 +37,32 @@ BFS_URL = BFS_SCHAUINSLAND_URL
 
 
 def fetch_bfs_schauinsland(timeout: float = 15.0) -> SourceFetch:
-    return _fetch_bfs_station(BFS_SCHAUINSLAND_URL, "BFS Schauinsland", timeout)
+    return _fetch_bfs_station(BFS_SCHAUINSLAND_URL, "BFS Schauinsland", SCHAUINSLAND_ALT_M, timeout)
 
 
 def fetch_bfs_freiburg(timeout: float = 15.0) -> SourceFetch:
-    return _fetch_bfs_station(BFS_FREIBURG_URL, "BFS Freiburg", timeout)
+    return _fetch_bfs_station(BFS_FREIBURG_URL, "BFS Freiburg", FREIBURG_ALT_M, timeout)
 
 
-def _fetch_bfs_station(url: str, name: str, timeout: float) -> SourceFetch:
+def fetch_bfs_best(timeout: float = 15.0) -> SourceFetch:
+    """Try Schauinsland first; fall back to Freiburg if unavailable."""
+    result = fetch_bfs_schauinsland(timeout)
+    if result.ok:
+        return result
+    freiburg = fetch_bfs_freiburg(timeout)
+    if freiburg.ok:
+        return freiburg
+    # Return Schauinsland failure (primary station) with combined error context
+    return SourceFetch(
+        name=result.name,
+        ok=False,
+        error=f"Schauinsland: {result.error}; Freiburg: {freiburg.error}",
+        latency_ms=result.latency_ms + freiburg.latency_ms,
+        station_alt_m=SCHAUINSLAND_ALT_M,
+    )
+
+
+def _fetch_bfs_station(url: str, name: str, station_alt_m: float, timeout: float) -> SourceFetch:
     t0 = time.monotonic()
     try:
         resp = httpx.get(url, timeout=timeout, follow_redirects=True)
@@ -57,14 +75,21 @@ def _fetch_bfs_station(url: str, name: str, timeout: float) -> SourceFetch:
                 ok=False,
                 error="Could not parse UV data from BFS page",
                 latency_ms=latency_ms,
+                station_alt_m=station_alt_m,
             )
-        return SourceFetch(name=name, ok=True, hourly=points, latency_ms=latency_ms)
+        return SourceFetch(
+            name=name, ok=True, hourly=points, latency_ms=latency_ms, station_alt_m=station_alt_m
+        )
     except httpx.TimeoutException:
         latency_ms = (time.monotonic() - t0) * 1000
-        return SourceFetch(name=name, ok=False, error="Timeout", latency_ms=latency_ms)
+        return SourceFetch(
+            name=name, ok=False, error="Timeout", latency_ms=latency_ms, station_alt_m=station_alt_m
+        )
     except Exception as e:
         latency_ms = (time.monotonic() - t0) * 1000
-        return SourceFetch(name=name, ok=False, error=str(e), latency_ms=latency_ms)
+        return SourceFetch(
+            name=name, ok=False, error=str(e), latency_ms=latency_ms, station_alt_m=station_alt_m
+        )
 
 
 def _parse_bfs_html(html: str) -> list[HourlyPoint]:

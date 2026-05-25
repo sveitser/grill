@@ -2,18 +2,20 @@
 
 import pytest
 
-from uvrad.fusion import FuseResult, fuse
+from uvrad.fusion import BFS_MAX_WEIGHT, FuseResult, fuse
 from uvrad.models import HourlyPoint, Location, SourceFetch, UVDataUnavailableError
 
 BASEL = Location(lat=47.5596, lon=7.5886, alt_m=260.0, name="Basel")
 
 
-def _make_fetch(name: str, uv_values: list[float], ok: bool = True) -> SourceFetch:
+def _make_fetch(
+    name: str, uv_values: list[float], ok: bool = True, station_alt_m: float | None = None
+) -> SourceFetch:
     points = [
         HourlyPoint(hour=h, uv_index=v, uv_index_clear_sky=v * 1.2, cloud_cover_pct=20.0)
         for h, v in enumerate(uv_values)
     ]
-    return SourceFetch(name=name, ok=ok, hourly=points if ok else [])
+    return SourceFetch(name=name, ok=ok, hourly=points if ok else [], station_alt_m=station_alt_m)
 
 
 def test_fuse_returns_fuse_result():
@@ -34,6 +36,7 @@ def test_fuse_two_sources_equal_weights():
     assert "Open-Meteo ECMWF" in r.sources_used
     assert r.bfs_offset is None
     assert r.bfs_hours_matched == 0
+    assert r.bfs_source_name is None
 
     # Hour 9: Global=8, ECMWF=9, equal weights → avg=8.5 before altitude correction
     expected_uv = 8.5 * (1.0 + 260.0 / 1000.0 * 0.10)
@@ -90,16 +93,70 @@ def test_fuse_altitude_correction_applied():
     assert r_bl.hourly[12].uv_index > r_sl.hourly[12].uv_index
 
 
-def test_fuse_bfs_offset_computed():
+def test_fuse_bfs_included_in_fusion():
+    """BFS ground measurement should be included in the fused result when available."""
     icon = _make_fetch("Open-Meteo Global", [0.0] * 6 + [4.0] * 12 + [0.0] * 6)
-    cams = _make_fetch("Open-Meteo ECMWF", [0.0] * 6 + [4.0] * 12 + [0.0] * 6)
-    bfs = _make_fetch("BFS Schauinsland", [0.0] * 6 + [6.0] * 12 + [0.0] * 6)
+    cams = _make_fetch("Open-Meteo GFS", [0.0] * 6 + [4.0] * 12 + [0.0] * 6)
+    # BFS measured at 0m so altitude correction is trivial; cloud=0 so max weight applies
+    bfs_points = [
+        HourlyPoint(
+            hour=h,
+            uv_index=0.0 if h < 6 or h >= 18 else 6.0,
+            uv_index_clear_sky=0.0 if h < 6 or h >= 18 else 6.0,
+            cloud_cover_pct=0.0,
+        )
+        for h in range(24)
+    ]
+    bfs = SourceFetch(name="BFS Schauinsland", ok=True, hourly=bfs_points, station_alt_m=0.0)
+
+    r_no_bfs = fuse(BASEL, icon, cams)
+    r_with_bfs = fuse(BASEL, icon, cams, bfs_fetch=bfs)
+
+    # With BFS reporting higher UV and max weight applied, fused UV should be higher
+    assert r_with_bfs.hourly[12].uv_index > r_no_bfs.hourly[12].uv_index
+    assert r_with_bfs.bfs_source_name == "BFS Schauinsland"
+    assert "BFS Schauinsland" in r_with_bfs.sources_used
+    assert len(r_with_bfs.bfs_hourly_weights) == 24
+    # At 20% model cloud cover, BFS weight should be BFS_MAX_WEIGHT * (1 - 0.2)
+    assert r_with_bfs.bfs_hourly_weights[12] == pytest.approx(BFS_MAX_WEIGHT * 0.8, rel=0.01)
+
+
+def test_fuse_bfs_excluded_when_fully_overcast():
+    """BFS weight drops to 0 at 100% cloud cover."""
+    icon_points = [
+        HourlyPoint(hour=h, uv_index=4.0, uv_index_clear_sky=5.0, cloud_cover_pct=100.0)
+        for h in range(24)
+    ]
+    gfs_points = [
+        HourlyPoint(hour=h, uv_index=4.0, uv_index_clear_sky=5.0, cloud_cover_pct=100.0)
+        for h in range(24)
+    ]
+    bfs_points = [
+        HourlyPoint(hour=h, uv_index=6.0, uv_index_clear_sky=6.0, cloud_cover_pct=0.0)
+        for h in range(24)
+    ]
+    icon2 = SourceFetch(name="Open-Meteo Global", ok=True, hourly=icon_points)
+    gfs2 = SourceFetch(name="Open-Meteo GFS", ok=True, hourly=gfs_points)
+    bfs = SourceFetch(name="BFS Schauinsland", ok=True, hourly=bfs_points, station_alt_m=0.0)
+
+    r = fuse(BASEL, icon2, gfs2, bfs_fetch=bfs)
+
+    # At 100% cloud, BFS weight should be 0 at all hours
+    assert all(w == pytest.approx(0.0) for w in r.bfs_hourly_weights)
+
+
+def test_fuse_bfs_offset_is_model_vs_ground():
+    """BFS offset should reflect model-only estimate vs BFS ground measurement."""
+    icon = _make_fetch("Open-Meteo Global", [0.0] * 6 + [4.0] * 12 + [0.0] * 6)
+    cams = _make_fetch("Open-Meteo GFS", [0.0] * 6 + [4.0] * 12 + [0.0] * 6)
+    bfs = _make_fetch("BFS Schauinsland", [0.0] * 6 + [6.0] * 12 + [0.0] * 6, station_alt_m=0.0)
 
     r = fuse(BASEL, icon, cams, bfs_fetch=bfs)
 
     assert r.bfs_offset is not None
-    assert r.bfs_offset != 0.0
     assert r.bfs_hours_matched == 12
+    # BFS (6.0 at 0m → adjusted to Basel 260m) vs model (4.0 at 0m → adjusted) should be positive
+    assert r.bfs_offset > 0.0
 
 
 def test_fuse_uv_never_negative():
@@ -119,9 +176,7 @@ def test_fuse_three_sources():
 
     assert len(r.sources_used) == 3
     assert "MeteoSwiss ICON-CH2" in r.sources_used
-    # All three have equal SOURCE_WEIGHTS (0.5), so equal final weights
     for w in r.weights.values():
         assert w == pytest.approx(1 / 3, rel=0.01)
-    # Average of 5, 7, 6 = 6 before altitude correction
     expected = 6.0 * (1.0 + 260.0 / 1000.0 * 0.10)
     assert r.hourly[8].uv_index == pytest.approx(expected, rel=0.01)
