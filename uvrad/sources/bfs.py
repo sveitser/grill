@@ -194,7 +194,7 @@ def _parse_png(png_bytes: bytes) -> list[HourlyPoint]:
         ~((r > 240) & (g > 240) & (b > 240))  # not white background
         & ~((r < 30) & (g < 30) & (b < 30))  # not black axis lines
         & ~((np.abs(r - g) < 20) & (np.abs(g - b) < 20) & (np.abs(r - b) < 20))  # not gray
-        & ~((b > r + 30) & (b > g + 30))  # not blue timestamp indicator
+        & ~((b > r + 20) & (b > g + 20))  # not blue/steel-blue timestamp indicator
     )
 
     # Build column profile: scan top-down in the plot area; first bar pixel = bar top
