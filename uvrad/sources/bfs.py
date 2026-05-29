@@ -25,8 +25,8 @@ import datetime as dt
 import io
 import logging
 import math
+import statistics
 import time
-from typing import cast
 
 import httpx
 
@@ -169,79 +169,81 @@ def _fetch_png(station_name: str, display_name: str, alt_m: float, timeout: floa
 def _parse_png(png_bytes: bytes) -> list[HourlyPoint]:
     """Extract hourly UV readings from a BFS chart PNG.
 
-    Scans each half-hour column bottom-up to find the bar top, converts the
-    y-pixel to a UV value, then averages the two half-hour slots per hour.
+    Builds a full column profile by scanning each x column top-down to find the
+    first bar pixel (= bar top, since bars are solid fills).  Per half-hour slot
+    the median bar-top across the middle 60 % of the slot's columns is used, which
+    handles early-morning 1-2 px bars and anti-aliasing artefacts robustly.
     """
     try:
+        import numpy as np
         from PIL import Image
     except ImportError:
-        logger.warning("Pillow not installed; PNG parsing unavailable")
+        logger.warning("Pillow/numpy not installed; PNG parsing unavailable")
         return []
 
-    img = Image.open(io.BytesIO(png_bytes)).convert("RGBA")
-    px = img.load()
-    if px is None:
-        return []
-    img_w, img_h = img.size
-
-    # Bail out if the chart template has changed significantly
-    if img_w != 640 or img_h != 480:
-        logger.warning("BFS PNG size changed: %dx%d (expected 640x480)", img_w, img_h)
+    img = Image.open(io.BytesIO(png_bytes)).convert("RGB")
+    w, h = img.size
+    if w != 640 or h != 480:
+        logger.warning("BFS PNG size changed: %dx%d (expected 640x480)", w, h)
         return []
 
-    def _is_bar(r: int, g: int, b: int) -> bool:
-        if r > 245 and g > 245 and b > 245:
-            return False  # white background
-        if abs(r - g) < 12 and abs(g - b) < 12:
-            return False  # gray (gridlines, clear-sky curve)
-        if r < 20 and g < 20 and b < 20:
-            return False  # black (axis lines)
-        return not (b > r + 20 and b > g + 20)  # blue (timestamp indicator top-right)
+    arr = np.asarray(img, dtype=np.int32)  # (H, W, 3)  — exact types, no pix[] ambiguity
+    r, g, b = arr[:, :, 0], arr[:, :, 1], arr[:, :, 2]
 
-    # Find the rightmost x where bar data exists (where today's data ends)
-    x_data_end = _PNG_X_START
-    for x in range(_PNG_X_START, _PNG_X_END):
-        r_px, g_px, b_px, *_ = cast(tuple[int, ...], img.getpixel((x, _PNG_Y_BOTTOM - 2)))
-        if _is_bar(r_px, g_px, b_px):
-            x_data_end = x
+    is_bar: np.ndarray = (
+        ~((r > 240) & (g > 240) & (b > 240))  # not white background
+        & ~((r < 30) & (g < 30) & (b < 30))  # not black axis lines
+        & ~((np.abs(r - g) < 20) & (np.abs(g - b) < 20) & (np.abs(r - b) < 20))  # not gray
+        & ~((b > r + 30) & (b > g + 30))  # not blue timestamp indicator
+    )
 
-    # Half-hour readings
+    # Build column profile: scan top-down in the plot area; first bar pixel = bar top
+    # (bars are solid fills so everything below is also bar-coloured).
+    # Using argmax on bool: returns index of first True (0 if none, checked via .any()).
+    plot = is_bar[_PNG_Y_TOP:_PNG_Y_BOTTOM, _PNG_X_START : _PNG_X_END + 1]  # (rows, cols)
+    col_top: dict[int, int] = {}
+    for x_local in range(plot.shape[1]):
+        col = plot[:, x_local]
+        if col.any():
+            col_top[_PNG_X_START + x_local] = _PNG_Y_TOP + int(np.argmax(col))
+
+    if not col_top:
+        return []
+
+    x_data_end = max(col_top)
+    half_px = _PNG_PX_PER_HOUR / 2  # pixels per half-hour slot
+
+    # For each half-hour slot, sample the middle 60 % of columns and take the
+    # median bar top — robust against bar-edge artefacts.
     half_hour_values: dict[tuple[int, int], float] = {}
     for hour in range(6, 21):
         for half in range(2):
             t_frac = (hour - 6) + half * 0.5
-            x = int(_PNG_X_START + (t_frac + 0.25) * _PNG_PX_PER_HOUR)
-            if x > x_data_end or x >= img_w:
+            x_center = _PNG_X_START + (t_frac + 0.25) * _PNG_PX_PER_HOUR
+            x_lo = max(_PNG_X_START, int(x_center - half_px * 0.3))
+            x_hi = min(x_data_end, int(x_center + half_px * 0.3))
+
+            tops = [col_top[x] for x in range(x_lo, x_hi + 1) if x in col_top]
+            if not tops:
                 continue
 
-            bar_top_y: int | None = None
-            for y in range(_PNG_Y_BOTTOM - 1, _PNG_Y_TOP - 1, -1):
-                r_px, g_px, b_px, *_ = cast(tuple[int, ...], img.getpixel((x, y)))
-                if _is_bar(r_px, g_px, b_px):
-                    bar_top_y = y
-                elif bar_top_y is not None:
-                    break
-
-            if bar_top_y is not None:
-                uv = max(
-                    0.0, (_PNG_Y_BOTTOM - bar_top_y) / (_PNG_Y_BOTTOM - _PNG_Y_TOP) * _PNG_UV_MAX
-                )
-                half_hour_values[(hour, half)] = round(uv, 2)
+            bar_top_y = statistics.median(tops)
+            uv = max(0.0, (_PNG_Y_BOTTOM - bar_top_y) / (_PNG_Y_BOTTOM - _PNG_Y_TOP) * _PNG_UV_MAX)
+            half_hour_values[(hour, half)] = round(uv, 2)
 
     if not half_hour_values:
         return []
 
-    # Average two half-hour slots per hour
     hourly: dict[int, list[float]] = {}
-    for (hour, _half), uv in half_hour_values.items():
+    for (hour, _), uv in half_hour_values.items():
         hourly.setdefault(hour, []).append(uv)
 
     return sorted(
         [
             HourlyPoint(
                 hour=h,
-                uv_index=sum(vals) / len(vals),
-                uv_index_clear_sky=sum(vals) / len(vals),
+                uv_index=round(sum(vals) / len(vals), 2),
+                uv_index_clear_sky=round(sum(vals) / len(vals), 2),
                 cloud_cover_pct=0.0,
             )
             for h, vals in hourly.items()
